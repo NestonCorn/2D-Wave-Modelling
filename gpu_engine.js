@@ -26,7 +26,7 @@ struct Params {
     domain_W  : f32,   // 48  physical width in metres
     domain_H  : f32,   // 52  physical height in metres
     use_free_surface : f32, // 56
-    _pad2 : f32,
+    geology_mode : u32,     // 60  0=salt, 1=flat, 2=fault
 };
 
 struct StepData {          // 64 bytes, padded to 256 in buffer (dynamic offset)
@@ -240,11 +240,28 @@ fn sismo_record(@builtin(global_invocation_id) gid: vec3<u32>) {
         ry = step.ry_tail + (step.ry_head - step.ry_tail) * norm;
         sismo_idx_base = i32(step.sismo_off) + i32(rec_i) * i32(params.GH);
     } else {
-        // OBS (Stationary on Seafloor) - proportional to domain
+        // OBS (Stationary on Seafloor) - position depends on geology model
         let obs_idx = rec_i - params.N_REC;
         rx = f32(obs_idx + 1u) * params.obs_spacing;
-        // Salt dome model: ry proportional to domain_H, matching CPU initSubsurface
-        ry = params.domain_H * 0.45 + (rx / params.domain_W) * (params.domain_H * 0.25) + 4.0;
+        // Match CPU worker.js initSubsurface geometry per geology model
+        if (params.geology_mode == 1u) {
+            // flat
+            ry = params.domain_H * 0.52;
+        } else if (params.geology_mode == 2u) {
+            // fault
+            let faultPos = params.domain_W / 2.0;
+            let throwAmt = params.domain_H * 0.31;
+            if (rx < faultPos) {
+                ry = params.domain_H * 0.45;
+            } else {
+                ry = params.domain_H * 0.45 + throwAmt;
+            }
+            ry += (rx / params.domain_W) * (params.domain_H * 0.1);
+        } else {
+            // salt dome (default)
+            ry = params.domain_H * 0.45 + (rx / params.domain_W) * (params.domain_H * 0.25);
+        }
+        ry += 4.0;
         sismo_idx_base = i32(params.N_REC * 2u * params.GH) + i32(obs_idx) * i32(params.GH);
     }
 
@@ -552,7 +569,7 @@ class GPUEngine {
     }
 
     // ── Write Params uniform ───────────────────────────────────────────────
-    _writeParams(dt, gain, domain_W, domain_H) {
+    _writeParams(dt, gain, domain_W, domain_H, useFreeSurface, geologyMode) {
         const W       = this.W_sim;
         const H       = this.H_sim;
         const sj_surf = Math.floor(this.OCEAN_Y / this.SCALE);
@@ -574,7 +591,8 @@ class GPUEngine {
         dv.setFloat32(44, this.obs_spacing,  true);
         dv.setFloat32(48, domain_W || 1200,  true);
         dv.setFloat32(52, domain_H || 480,   true);
-        dv.setFloat32(56, (typeof useFreeSurface !== 'undefined' && useFreeSurface) ? 1.0 : 0.0, true);
+        dv.setFloat32(56, useFreeSurface ? 1.0 : 0.0, true);
+        dv.setUint32( 60, geologyMode !== undefined ? geologyMode : 0, true); // 0=salt,1=flat,2=fault
         this.device.queue.writeBuffer(this.buf_params, 0, ab);
         this._dt   = dt;
         this._gain = gain;
@@ -673,7 +691,7 @@ class GPUEngine {
             this.CABLE_LEN = cable_len;
             this._domain_W = domain_W;
             this._domain_H = domain_H;
-            this._writeParams(dt, display_gain, domain_W, domain_H);
+            this._writeParams(dt, display_gain, domain_W, domain_H, opts.useFreeSurface, opts.geologyMode);
         }
 
         // Pre-compute & upload all per-step source/sismo data (one writeBuffer call)
