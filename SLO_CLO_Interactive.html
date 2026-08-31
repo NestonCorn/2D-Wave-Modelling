@@ -1865,7 +1865,7 @@
             gridDebounceTimer = setTimeout(() => _setGridSize(s), 100);
         }
 
-        function _setGridSize(s) {
+        async function _setGridSize(s) {
             SCALE = parseFloat(s);
             const numInp = document.getElementById('dhVal');
             const slider = document.getElementById('sl_dh');
@@ -2455,7 +2455,7 @@
                 x_at_t0: xPos,
                 printed: false
             });
-            await await updateEikonal();
+            await updateEikonal();
         }
 
         // ── SEG-Y Live Recording State ────────────────────────────────────────────────
