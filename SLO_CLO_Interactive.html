@@ -2696,7 +2696,7 @@
                 // Submit all FDTD steps as one GPU command buffer
                 let eikBox = getEikonalBox((cycle_t + steps) * dt_phy);
                 const result = await gpuEngine.submitBatch({
-                    steps, cycle_start: cycle_t, dt, dt_phy, mode,
+                    steps, cycle_start: cycle_t, dt, dt_phy, mode, useFreeSurface, geologyMode: ui_geology_model === 'flat' ? 1 : ui_geology_model === 'fault' ? 2 : 0,
                     sxShip, sxSrc, activeShots,
                     source_freq: source_frequency, source_amp: source_amplitude,
                     cur_t_max, T_sismo_ticks: T_sismo,
