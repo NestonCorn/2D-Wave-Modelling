@@ -1913,7 +1913,7 @@
 
             spawnWorkers();
             initGPU(); // Try GPU init after workers are ready (GPU uses V_sq which is now filled)
-            updateEikonal();
+            await updateEikonal();
         }
 
         function resetCPML() {
@@ -1922,7 +1922,8 @@
         }
 
         let T_eikonal = null;
-        function updateEikonal() {
+        let eikonalProgressUI = null;
+        async function updateEikonal() {
             if (!T_eikonal || T_eikonal.length !== W_sim * H_sim) {
                 T_eikonal = new Float32Array(W_sim * H_sim);
             }
@@ -1941,8 +1942,43 @@
                 }
             }
 
+            if (!eikonalProgressUI) {
+                eikonalProgressUI = document.createElement('div');
+                eikonalProgressUI.style.position = 'fixed';
+                eikonalProgressUI.style.bottom = '30px';
+                eikonalProgressUI.style.right = '30px';
+                eikonalProgressUI.style.background = 'rgba(13, 17, 23, 0.9)';
+                eikonalProgressUI.style.border = '1px solid var(--accent-cyan)';
+                eikonalProgressUI.style.padding = '12px 18px';
+                eikonalProgressUI.style.borderRadius = '8px';
+                eikonalProgressUI.style.color = '#fff';
+                eikonalProgressUI.style.zIndex = '9999';
+                eikonalProgressUI.style.fontFamily = 'Outfit, sans-serif';
+                eikonalProgressUI.style.fontSize = '13px';
+                eikonalProgressUI.style.boxShadow = '0 0 20px rgba(0, 242, 255, 0.2)';
+                eikonalProgressUI.style.display = 'none';
+                eikonalProgressUI.innerHTML = `
+                    <div style="margin-bottom: 6px; font-weight: 500;">Eikonal Çözücü: <span id="eikonal-pct" style="color: var(--accent-cyan);">0</span>%</div>
+                    <div style="width: 180px; height: 6px; background: rgba(255,255,255,0.1); border-radius: 3px; overflow: hidden;">
+                        <div id="eikonal-bar" style="width: 0%; height: 100%; background: linear-gradient(90deg, #0084ff, #00f2ff); border-radius: 3px; transition: width 0.05s ease-out;"></div>
+                    </div>
+                `;
+                document.body.appendChild(eikonalProgressUI);
+            }
+
+            eikonalProgressUI.style.display = 'block';
+            let pctEl = document.getElementById('eikonal-pct');
+            let barEl = document.getElementById('eikonal-bar');
+
             let sweeps = 4;
             for (let s = 0; s < sweeps; s++) {
+                // UI update
+                let pct = Math.round((s / sweeps) * 100);
+                pctEl.innerText = pct;
+                barEl.style.width = pct + '%';
+                // Yield to event loop to actually draw the UI
+                await new Promise(resolve => setTimeout(resolve, 0));
+
                 let i_start = (s % 2 === 0) ? 1 : W_sim - 2;
                 let i_end = (s % 2 === 0) ? W_sim - 1 : 0;
                 let i_step = (s % 2 === 0) ? 1 : -1;
@@ -1975,6 +2011,12 @@
                     }
                 }
             }
+            
+            // Finalize UI
+            pctEl.innerText = '100';
+            barEl.style.width = '100%';
+            await new Promise(resolve => setTimeout(resolve, 10)); // tiny delay to show 100%
+            eikonalProgressUI.style.display = 'none';
         }
         function getEikonalBox(current_t_sec) {
             if (!useExpandingBox) return { min_i: 0, max_i: W_sim - 1, min_j: 0, max_j: H_sim - 1 };
@@ -2034,7 +2076,7 @@
             }
             return { bz: b_z_arr, az: a_z_arr };
         }
-        function initSubsurface() {
+        async function initSubsurface() {
             layout.seafloor = []; layout.salt = []; layout.deep = [];
 
             for (let x = -100; x <= W + 200; x += (W / 200)) {
@@ -2339,8 +2381,8 @@
 
             clearGather();
             updateLegendUI();
-            fireShot('main', sxShip - ship_src_dist);
-            if (m === 'slo') fireShot('src', sxSrc - ship_src_dist, 25);
+            await fireShot('main', sxShip - ship_src_dist);
+            if (m === 'slo') await fireShot('src', sxSrc - ship_src_dist, 25);
 
             loop();
         }
@@ -2403,7 +2445,7 @@
 
 
 
-        function fireShot(type, xPos, delayTime = 0) {
+        async function fireShot(type, xPos, delayTime = 0) {
             if (type === 'main') shotsMain++;
             else if (type === 'src') shotsSrc++;
 
@@ -2413,7 +2455,7 @@
                 x_at_t0: xPos,
                 printed: false
             });
-            updateEikonal();
+            await await updateEikonal();
         }
 
         // ── SEG-Y Live Recording State ────────────────────────────────────────────────
@@ -2620,8 +2662,8 @@
                     await gpuEngine.clearWavefield();
                     await gpuEngine.clearSismo();
                     sismo_data.fill(0); clearGather();
-                    fireShot('main', sxShip - ship_src_dist);
-                    if (mode === 'slo') fireShot('src', sxSrc - ship_src_dist, 25);
+                    await fireShot('main', sxShip - ship_src_dist);
+                    if (mode === 'slo') await fireShot('src', sxSrc - ship_src_dist, 25);
                 }
 
                 // Cap steps so we never overshoot max_time in a single batch.
@@ -2645,7 +2687,7 @@
                 // Uses range check instead of === to handle multi-step jumps.
                 const prev_t_gpu = cycle_t;
                 if (mode === 'clo' && prev_t_gpu < cur_t_max && cycle_t + steps >= cur_t_max) {
-                    fireShot('src', sxSrc - ship_src_dist, 0);
+                    await fireShot('src', sxSrc - ship_src_dist, 0);
                 }
 
                 // Update GPU V_sq if subsurface changed (tracked via dirty flag)
@@ -2747,7 +2789,7 @@
 
 
         // ── CPU worker loop (original) ────────────────────────────────────────────────
-        function cpuLoop() {
+        async function cpuLoop() {
             if (isComputing) return;
 
             let dt_phy = (SCALE / 6000.0) * dt;
@@ -2788,8 +2830,8 @@
                 resetCPML();
                 clearGather();
 
-                fireShot('main', sxShip - ship_src_dist);
-                if (mode === 'slo') fireShot('src', sxSrc - ship_src_dist, 25);
+                await fireShot('main', sxShip - ship_src_dist);
+                if (mode === 'slo') await fireShot('src', sxSrc - ship_src_dist, 25);
             }
 
             // Cap steps so we never overshoot max_time in a single batch.
@@ -2808,7 +2850,7 @@
             // Range check instead of === to handle multi-step jumps per frame.
             const prev_t_cpu = cycle_t;
             if (mode === 'clo' && prev_t_cpu < cur_t_max && cycle_t + steps >= cur_t_max) {
-                fireShot('src', sxSrc - ship_src_dist, 0);
+                await fireShot('src', sxSrc - ship_src_dist, 0);
             }
 
             // Asynchronous PHYSICS Compute using SharedArrayBuffer CPU Multi-threading
