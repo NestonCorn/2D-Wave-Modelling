@@ -2024,37 +2024,74 @@
             barEl.style.width = '100%';
             await new Promise(resolve => setTimeout(resolve, 10)); // tiny delay to show 100%
             eikonalProgressUI.style.display = 'none';
-        }
-        function getEikonalBox(current_t_sec) {
-            if (!useExpandingBox) return { min_i: 0, max_i: W_sim - 1, min_j: 0, max_j: H_sim - 1 };
-            if (!T_eikonal || activeShots.length === 0) {
-                return { min_i: 0, max_i: W_sim - 1, min_j: 0, max_j: H_sim - 1 };
+        
+            // Build Lookup Table for O(1) Expanding Box query
+            let max_t = 0;
+            for(let i=0; i<T_eikonal.length; i++) {
+                if(T_eikonal[i] < 1e8 && T_eikonal[i] > max_t) max_t = T_eikonal[i];
             }
-            let min_i = W_sim, max_i = 0, min_j = H_sim, max_j = 0;
-            // A conservative margin (0.3 seconds ahead + padding)
-            let limit = current_t_sec + 0.01; 
-            
+            let num_steps = Math.ceil(max_t / 0.01) + 5;
+            window.eikonal_lookup = new Array(num_steps);
+            for(let s=0; s<num_steps; s++) {
+                window.eikonal_lookup[s] = { min_i: W_sim, max_i: 0, min_j: H_sim, max_j: 0 };
+            }
+
             for (let j = 0; j < H_sim; j++) {
                 let row = j * W_sim;
                 for (let i = 0; i < W_sim; i++) {
-                    if (T_eikonal[row + i] <= limit) {
-                        if (i < min_i) min_i = i;
-                        if (i > max_i) max_i = i;
-                        if (j < min_j) min_j = j;
-                        if (j > max_j) max_j = j;
+                    let t = T_eikonal[row + i];
+                    if (t < 1e8) {
+                        let s_start = Math.max(0, Math.floor(t / 0.01));
+                        if (s_start < num_steps) {
+                            let box = window.eikonal_lookup[s_start];
+                            if (i < box.min_i) box.min_i = i;
+                            if (i > box.max_i) box.max_i = i;
+                            if (j < box.min_j) box.min_j = j;
+                            if (j > box.max_j) box.max_j = j;
+                        }
                     }
                 }
             }
             
-            let pad = 5; // padding for stencils and CPML
+            let cur = { min_i: W_sim, max_i: 0, min_j: H_sim, max_j: 0 };
+            for(let s=0; s<num_steps; s++) {
+                let b = window.eikonal_lookup[s];
+                if (b.min_i < cur.min_i) cur.min_i = b.min_i;
+                if (b.max_i > cur.max_i) cur.max_i = b.max_i;
+                if (b.min_j < cur.min_j) cur.min_j = b.min_j;
+                if (b.max_j > cur.max_j) cur.max_j = b.max_j;
+                window.eikonal_lookup[s] = { min_i: cur.min_i, max_i: cur.max_i, min_j: cur.min_j, max_j: cur.max_j };
+            }
+        
+        }
+        function getEikonalBox(current_t_sec) {
+            if (!useExpandingBox) return { min_i: 0, max_i: W_sim - 1, min_j: 0, max_j: H_sim - 1 };
+            if (!window.eikonal_lookup || window.eikonal_lookup.length === 0 || activeShots.length === 0) {
+                return { min_i: 0, max_i: W_sim - 1, min_j: 0, max_j: H_sim - 1 };
+            }
+            
+            let limit = current_t_sec + 0.01; 
+            let s = Math.floor(limit / 0.01);
+            if (s >= window.eikonal_lookup.length) s = window.eikonal_lookup.length - 1;
+            if (s < 0) s = 0;
+            
+            let box = window.eikonal_lookup[s];
+            let min_i = box.min_i;
+            let max_i = box.max_i;
+            let min_j = box.min_j;
+            let max_j = box.max_j;
+            
+            if (min_i > max_i) { min_i = 0; max_i = W_sim - 1; min_j = 0; max_j = H_sim - 1; }
+            
+            let pad = 5;
             min_i = Math.max(0, min_i - pad);
             max_i = Math.min(W_sim - 1, max_i + pad);
             min_j = Math.max(0, min_j - pad);
             max_j = Math.min(H_sim - 1, max_j + pad);
             
-            if (min_i > max_i || min_j > max_j) {
-                 return { min_i: 0, max_i: W_sim - 1, min_j: 0, max_j: H_sim - 1 };
-            }
+            let sj_surf = Math.floor(OCEAN_Y / SCALE);
+            min_j = Math.max(Math.max(0, sj_surf - pad), min_j - pad);
+            
             return { min_i, max_i, min_j, max_j };
         }
 
