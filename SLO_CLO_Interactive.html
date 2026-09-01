@@ -2070,7 +2070,7 @@
                 return { min_i: 0, max_i: W_sim - 1, min_j: 0, max_j: H_sim - 1 };
             }
             
-            let limit = current_t_sec + 0.01; 
+            let limit = current_t_sec * 0.2 + 0.001; // Scale factor 0.2 (20% margin over the 1/6th Eikonal scale) to keep the box narrow but safe 
             let s = Math.floor(limit / 0.0005);
             if (s >= window.eikonal_lookup.length) s = window.eikonal_lookup.length - 1;
             if (s < 0) s = 0;
