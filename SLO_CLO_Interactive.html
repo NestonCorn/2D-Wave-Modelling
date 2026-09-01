@@ -846,6 +846,7 @@
             <span style="color:rgba(255,255,255,0.2);">|</span>
             <span id="cpuCount" style="color: var(--accent-green); font-weight: 700; font-size: 11px;">🧠 CPU: --
                 Cekirdek</span>
+            <span id="timerBadge" style="color: #ffcc00; font-weight: 700; font-size: 11px;">Gecen Sure: 0 sn</span>
         </div>
 
         <div class="canvas-wrapper">
@@ -2420,7 +2421,21 @@
             if (slider) slider.value = shot_interval;
         }
 
+        let simElapsedSec = 0;
+        let simTimerInterval = null;
+
         async function startMode(m) {
+            simElapsedSec = 0;
+            let tb = document.getElementById('timerBadge');
+            if (tb) tb.innerText = 'Gecen Sure: 0 sn';
+            if (simTimerInterval) clearInterval(simTimerInterval);
+            simTimerInterval = setInterval(() => {
+                if (isComputing && !isPaused && !instability) {
+                    simElapsedSec++;
+                    if (tb) tb.innerText = 'Gecen Sure: ' + simElapsedSec + ' sn';
+                }
+            }, 1000);
+
             cancelNext();
             isComputing = false;
             instability = false;
@@ -2493,6 +2508,10 @@
 
 
         async function stopMode() {
+            if (simTimerInterval) clearInterval(simTimerInterval);
+            let tb = document.getElementById('timerBadge');
+            if (tb) tb.innerText = 'Gecen Sure: 0 sn';
+            
             cancelNext();
             mode = 'none';
             activeShots = [];
