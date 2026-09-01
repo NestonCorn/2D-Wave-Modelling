@@ -1331,6 +1331,7 @@
             if (numInp) numInp.value = source_amplitude.toFixed(1);
             if (slider) slider.value = source_amplitude;
         }
+        let ui_wavelet_type = 'ricker';
         let source_frequency = 50.0;
         function updateFrequency(v) {
             source_frequency = parseFloat(v);
@@ -2698,7 +2699,7 @@
                 const result = await gpuEngine.submitBatch({
                     steps, cycle_start: cycle_t, dt, dt_phy, mode, useFreeSurface, geologyMode: ui_geology_model === 'flat' ? 1 : ui_geology_model === 'fault' ? 2 : 0,
                     sxShip, sxSrc, activeShots,
-                    source_freq: source_frequency, source_amp: source_amplitude,
+                    source_freq: source_frequency, source_amp: source_amplitude, wavelet_type: ui_wavelet_type,
                     cur_t_max, T_sismo_ticks: T_sismo,
                     fd_order, display_gain: display_gain, W_max: W_sim * SCALE,
                     sismoOnly: sismoOnlyMode,

@@ -630,11 +630,16 @@ class GPUEngine {
                 const max_sec     = 3.0 / source_freq;
                 let   val         = 0;
                 if (elapsed_sec >= 0 && elapsed_sec < max_sec) {
-                    const t    = elapsed_sec - delay_sec;
-                    const pi2  = Math.PI * Math.PI;
-                    const fpt2 = pi2 * source_freq * source_freq * t * t;
-                    // Ricker wavelet, pre-multiplied by dt*0.4 (worker parity)
-                    val = (1.0 - 2.0 * fpt2) * Math.exp(-fpt2) * source_amp * dt * 0.4;
+                    if (opts.wavelet_type === 'minphase') {
+                        const omega = 2.0 * Math.PI * source_freq;
+                        val = 3.1 * Math.exp(-omega * elapsed_sec) * Math.sin(omega * elapsed_sec) * source_amp * dt * 0.4;
+                    } else {
+                        const t    = elapsed_sec - delay_sec;
+                        const pi2  = Math.PI * Math.PI;
+                        const fpt2 = pi2 * source_freq * source_freq * t * t;
+                        // Ricker wavelet, pre-multiplied by dt*0.4 (worker parity)
+                        val = (1.0 - 2.0 * fpt2) * Math.exp(-fpt2) * source_amp * dt * 0.4;
+                    }
                 }
                 const ship_src_dist = opts.ship_src_dist || 0;
                 const src_px = ((sh.type === 'main') ? sxShip_s : sxSrc_s) - ship_src_dist;
