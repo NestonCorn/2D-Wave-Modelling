@@ -1938,7 +1938,7 @@
 
             if (activeShots.length === 0) return;
 
-            let h = SCALE / 1500.0; // Eikonal safety margin (1.5x expansion speed) to prevent bounding box reflections
+            let h = SCALE / 6000.0;
             for (let shot of activeShots) {
                 let ship_src_dist_val = ship_src_dist || 0;
                 let src_pos = ((shot.type === 'main') ? sxShip : sxSrc) - ship_src_dist_val;
@@ -2083,7 +2083,7 @@
             
             if (min_i > max_i) { min_i = 0; max_i = W_sim - 1; min_j = 0; max_j = H_sim - 1; }
             
-            let pad = 30; // generous padding to ensure physical wave never touches the hard truncation boundary
+            let pad = 5; // padding for stencils and CPML
             min_i = Math.max(0, min_i - pad);
             max_i = Math.min(W_sim - 1, max_i + pad);
             min_j = Math.max(0, min_j - pad);
