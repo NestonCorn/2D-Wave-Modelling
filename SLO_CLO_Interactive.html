@@ -2123,6 +2123,16 @@
                         out_xMaxZ[j] = Math.min(W_sim - 1, box.xMaxZ[j] + pad);
                     }
                 }
+                
+                // Fill padded regions to prevent visualizer glitches
+                for (let j = box.max_j + 1; j < H_sim; j++) {
+                    out_xMinZ[j] = out_xMinZ[box.max_j];
+                    out_xMaxZ[j] = out_xMaxZ[box.max_j];
+                }
+                for (let j = box.min_j - 1; j >= 0; j--) {
+                    out_xMinZ[j] = out_xMinZ[box.min_j];
+                    out_xMaxZ[j] = out_xMaxZ[box.min_j];
+                }
             }
             
             min_i = Math.max(0, min_i - pad);
