@@ -2030,7 +2030,8 @@
             for(let i=0; i<T_eikonal.length; i++) {
                 if(T_eikonal[i] < 1e8 && T_eikonal[i] > max_t) max_t = T_eikonal[i];
             }
-            let num_steps = Math.ceil(max_t / 0.0005) + 5;
+            let dt_phy_bucket = (SCALE / 6000.0) * dt;
+            let num_steps = Math.ceil(max_t / dt_phy_bucket) + 5;
             window.eikonal_lookup = new Array(num_steps);
             for(let s=0; s<num_steps; s++) {
                 window.eikonal_lookup[s] = { min_i: W_sim, max_i: 0, min_j: H_sim, max_j: 0 };
@@ -2041,7 +2042,7 @@
                 for (let i = 0; i < W_sim; i++) {
                     let t = T_eikonal[row + i];
                     if (t < 1e8) {
-                        let s_start = Math.max(0, Math.floor(t / 0.0005));
+                        let s_start = Math.max(0, Math.floor(t / dt_phy_bucket));
                         if (s_start < num_steps) {
                             let box = window.eikonal_lookup[s_start];
                             if (i < box.min_i) box.min_i = i;
@@ -2070,8 +2071,9 @@
                 return { min_i: 0, max_i: W_sim - 1, min_j: 0, max_j: H_sim - 1 };
             }
             
-            let limit = current_t_sec + 0.01; 
-            let s = Math.floor(limit / 0.0005);
+            let dt_phy_bucket = (SCALE / 6000.0) * dt;
+            let limit = current_t_sec + dt_phy_bucket; // Base limit strictly on 1 simulation time step margin
+            let s = Math.floor(limit / dt_phy_bucket);
             if (s >= window.eikonal_lookup.length) s = window.eikonal_lookup.length - 1;
             if (s < 0) s = 0;
             
@@ -2083,7 +2085,7 @@
             
             if (min_i > max_i) { min_i = 0; max_i = W_sim - 1; min_j = 0; max_j = H_sim - 1; }
             
-            let pad = 5; // padding for stencils and CPML
+            let pad = Math.ceil(fd_order / 2.0) + 1; // Minimum safe margin based directly on derivative order
             min_i = Math.max(0, min_i - pad);
             max_i = Math.min(W_sim - 1, max_i + pad);
             min_j = Math.max(0, min_j - pad);
