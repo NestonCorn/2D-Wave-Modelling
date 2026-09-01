@@ -2025,7 +2025,7 @@
             await new Promise(resolve => setTimeout(resolve, 10)); // tiny delay to show 100%
             eikonalProgressUI.style.display = 'none';
         
-            // Build Lookup Table for O(1) Expanding Box query
+            // Build Lookup Table for O(1) Expanding Box query (1.5D Polygon)
             let max_t = 0;
             for(let i=0; i<T_eikonal.length; i++) {
                 if(T_eikonal[i] < 1e8 && T_eikonal[i] > max_t) max_t = T_eikonal[i];
@@ -2034,7 +2034,11 @@
             let num_steps = Math.ceil(max_t / dt_phy_bucket) + 5;
             window.eikonal_lookup = new Array(num_steps);
             for(let s=0; s<num_steps; s++) {
-                window.eikonal_lookup[s] = { min_i: W_sim, max_i: 0, min_j: H_sim, max_j: 0 };
+                let xMinZ = new Int32Array(H_sim);
+                xMinZ.fill(W_sim);
+                let xMaxZ = new Int32Array(H_sim);
+                xMaxZ.fill(0);
+                window.eikonal_lookup[s] = { min_i: W_sim, max_i: 0, min_j: H_sim, max_j: 0, xMinZ: xMinZ, xMaxZ: xMaxZ };
             }
 
             for (let j = 0; j < H_sim; j++) {
@@ -2049,26 +2053,44 @@
                             if (i > box.max_i) box.max_i = i;
                             if (j < box.min_j) box.min_j = j;
                             if (j > box.max_j) box.max_j = j;
+                            if (i < box.xMinZ[j]) box.xMinZ[j] = i;
+                            if (i > box.xMaxZ[j]) box.xMaxZ[j] = i;
                         }
                     }
                 }
             }
             
-            let cur = { min_i: W_sim, max_i: 0, min_j: H_sim, max_j: 0 };
+            // Forward sweep for monotonic expansion (global bounds + per-row bounds)
+            let cur_min_i = W_sim, cur_max_i = 0, cur_min_j = H_sim, cur_max_j = 0;
+            let cur_xMinZ = new Int32Array(H_sim);
+            cur_xMinZ.fill(W_sim);
+            let cur_xMaxZ = new Int32Array(H_sim);
+            cur_xMaxZ.fill(0);
+            
             for(let s=0; s<num_steps; s++) {
                 let b = window.eikonal_lookup[s];
-                if (b.min_i < cur.min_i) cur.min_i = b.min_i;
-                if (b.max_i > cur.max_i) cur.max_i = b.max_i;
-                if (b.min_j < cur.min_j) cur.min_j = b.min_j;
-                if (b.max_j > cur.max_j) cur.max_j = b.max_j;
-                window.eikonal_lookup[s] = { min_i: cur.min_i, max_i: cur.max_i, min_j: cur.min_j, max_j: cur.max_j };
+                if (b.min_i < cur_min_i) cur_min_i = b.min_i;
+                if (b.max_i > cur_max_i) cur_max_i = b.max_i;
+                if (b.min_j < cur_min_j) cur_min_j = b.min_j;
+                if (b.max_j > cur_max_j) cur_max_j = b.max_j;
+                
+                let out_xMinZ = new Int32Array(H_sim);
+                let out_xMaxZ = new Int32Array(H_sim);
+                for(let j = 0; j < H_sim; j++) {
+                    if (b.xMinZ[j] < cur_xMinZ[j]) cur_xMinZ[j] = b.xMinZ[j];
+                    if (b.xMaxZ[j] > cur_xMaxZ[j]) cur_xMaxZ[j] = b.xMaxZ[j];
+                    out_xMinZ[j] = cur_xMinZ[j];
+                    out_xMaxZ[j] = cur_xMaxZ[j];
+                }
+                
+                window.eikonal_lookup[s] = { min_i: cur_min_i, max_i: cur_max_i, min_j: cur_min_j, max_j: cur_max_j, xMinZ: out_xMinZ, xMaxZ: out_xMaxZ };
             }
         
         }
         function getEikonalBox(current_t_sec) {
-            if (!useExpandingBox) return { min_i: 0, max_i: W_sim - 1, min_j: 0, max_j: H_sim - 1 };
+            if (!useExpandingBox) return { min_i: 0, max_i: W_sim - 1, min_j: 0, max_j: H_sim - 1, xMinZ: null, xMaxZ: null };
             if (!window.eikonal_lookup || window.eikonal_lookup.length === 0 || activeShots.length === 0) {
-                return { min_i: 0, max_i: W_sim - 1, min_j: 0, max_j: H_sim - 1 };
+                return { min_i: 0, max_i: W_sim - 1, min_j: 0, max_j: H_sim - 1, xMinZ: null, xMaxZ: null };
             }
             
             let dt_phy_bucket = (SCALE / 6000.0) * dt;
@@ -2083,18 +2105,35 @@
             let min_j = box.min_j;
             let max_j = box.max_j;
             
-            if (min_i > max_i) { min_i = 0; max_i = W_sim - 1; min_j = 0; max_j = H_sim - 1; }
-            
             let pad = Math.ceil(fd_order / 2.0) + 1; // Minimum safe margin based directly on derivative order
+            
+            let out_xMinZ = new Int32Array(H_sim);
+            out_xMinZ.fill(W_sim);
+            let out_xMaxZ = new Int32Array(H_sim);
+            out_xMaxZ.fill(0);
+
+            if (min_i > max_i) { 
+                min_i = 0; max_i = W_sim - 1; min_j = 0; max_j = H_sim - 1; 
+                out_xMinZ.fill(0);
+                out_xMaxZ.fill(W_sim - 1);
+            } else {
+                for (let j = 0; j < H_sim; j++) {
+                    if (box.xMinZ[j] <= box.xMaxZ[j]) {
+                        out_xMinZ[j] = Math.max(0, box.xMinZ[j] - pad);
+                        out_xMaxZ[j] = Math.min(W_sim - 1, box.xMaxZ[j] + pad);
+                    }
+                }
+            }
+            
             min_i = Math.max(0, min_i - pad);
             max_i = Math.min(W_sim - 1, max_i + pad);
             min_j = Math.max(0, min_j - pad);
             max_j = Math.min(H_sim - 1, max_j + pad);
             
             let sj_surf = Math.floor(OCEAN_Y / SCALE);
-            min_j = Math.max(Math.max(0, sj_surf - pad), min_j - pad);
+            min_j = Math.max(Math.max(0, sj_surf - pad), min_j);
             
-            return { min_i, max_i, min_j, max_j };
+            return { min_i, max_i, min_j, max_j, xMinZ: out_xMinZ, xMaxZ: out_xMaxZ };
         }
 
                             function recalcCPML() {
@@ -3381,19 +3420,39 @@
             // Draw Expanding Box
             let dt_phy_box = (SCALE / 6000.0) * dt;
             let eikBox = getEikonalBox(cycle_t * dt_phy_box);
-            if (useExpandingBox && eikBox && activeShots.length > 0) {
+            if (useExpandingBox && eikBox && activeShots.length > 0 && eikBox.xMinZ && eikBox.xMaxZ) {
                 ctx.strokeStyle = 'rgba(255, 255, 0, 0.5)';
                 ctx.lineWidth = 2 * rX;
                 ctx.setLineDash([5, 5]);
                 let sj_surf = Math.floor(OCEAN_Y / SCALE);
                 let draw_min_j = Math.max(sj_surf, eikBox.min_j);
-                if (eikBox.max_j > draw_min_j) {
-                    ctx.strokeRect(
-                        eikBox.min_i * SCALE * (W / (W_sim * SCALE)), 
-                        draw_min_j * SCALE * (H_main / (H_sim * SCALE)), 
-                        (eikBox.max_i - eikBox.min_i) * SCALE * (W / (W_sim * SCALE)), 
-                        (eikBox.max_j - draw_min_j) * SCALE * (H_main / (H_sim * SCALE))
-                    );
+                let draw_max_j = eikBox.max_j;
+                
+                if (draw_max_j > draw_min_j) {
+                    let sx = W / W_sim;
+                    let sy = H_main / H_sim;
+                    
+                    ctx.beginPath();
+                    // Sol üst köşe
+                    ctx.moveTo(eikBox.xMinZ[draw_min_j] * sx, draw_min_j * sy);
+                    
+                    // Sol dış sınır aşağı
+                    for (let j = draw_min_j + 1; j <= draw_max_j; j++) {
+                        ctx.lineTo(eikBox.xMinZ[j] * sx, j * sy);
+                    }
+                    
+                    // En alt sağ köşeye (zMax kapağı)
+                    ctx.lineTo(eikBox.xMaxZ[draw_max_j] * sx, draw_max_j * sy);
+                    
+                    // Sağ dış sınır yukarı
+                    for (let j = draw_max_j - 1; j >= draw_min_j; j--) {
+                        ctx.lineTo(eikBox.xMaxZ[j] * sx, j * sy);
+                    }
+                    
+                    // En üst sol köşeye geri (zMin kapağı)
+                    ctx.lineTo(eikBox.xMinZ[draw_min_j] * sx, draw_min_j * sy);
+                    
+                    ctx.stroke();
                 }
                 ctx.setLineDash([]);
             }
