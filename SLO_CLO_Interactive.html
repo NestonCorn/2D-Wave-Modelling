@@ -1938,7 +1938,7 @@
 
             if (activeShots.length === 0) return;
 
-            let h = SCALE / 6000.0;
+            let h = SCALE / 1000.0; // SCALE is in meters, V_sq is in (km/s)^2, so h must be in km
             for (let shot of activeShots) {
                 let ship_src_dist_val = ship_src_dist || 0;
                 let src_pos = ((shot.type === 'main') ? sxShip : sxSrc) - ship_src_dist_val;
