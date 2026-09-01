@@ -626,7 +626,13 @@
                 </div>
                 <div class="dashboard-card">
                     <div class="card-title">🌊 Sinyal Özellikleri</div>
-                    <div class="param-row">
+                                        <div class="param-row">
+                        <span class="param-label">Dalgac&#305;k Tipi</span>
+                        <select id="sl_wavelet" class="num-input" style="width: 140px; text-align: left;" onchange="ui_wavelet_type = this.value; checkNumericalStatus();">
+                            <option value="ricker">Ricker (S&#305;f&#305;r Faz)</option>
+                            <option value="minphase">Minimum Faz</option>
+                        </select>
+                    </div><div class="param-row">
                         <span class="param-label">Dominant Frekans (Hz)</span>
                         <input type="range" id="sl_freq" min="0.5" max="250.0" step="0.5" value="50.0"
                             oninput="document.getElementById('freqVal').value=this.value; updateFrequency(this.value)">
