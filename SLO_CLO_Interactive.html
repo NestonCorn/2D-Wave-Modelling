@@ -2141,8 +2141,10 @@
             min_j = Math.max(0, min_j - pad);
             max_j = Math.min(H_sim - 1, max_j + pad);
             
-            let sj_surf = Math.floor(OCEAN_Y / SCALE);
-            min_j = Math.max(Math.max(0, sj_surf - pad), min_j);
+            if (useFreeSurface) {
+                let sj_surf = Math.floor(OCEAN_Y / SCALE);
+                min_j = Math.max(Math.max(0, sj_surf - pad), min_j);
+            }
             
             return { min_i, max_i, min_j, max_j, xMinZ: out_xMinZ, xMaxZ: out_xMaxZ };
         }
@@ -3454,7 +3456,7 @@
                 ctx.lineWidth = 2 * rX;
                 ctx.setLineDash([5, 5]);
                 let sj_surf = Math.floor(OCEAN_Y / SCALE);
-                let draw_min_j = Math.max(sj_surf, eikBox.min_j);
+                let draw_min_j = useFreeSurface ? Math.max(sj_surf, eikBox.min_j) : eikBox.min_j;
                 let draw_max_j = eikBox.max_j;
                 
                 if (draw_max_j > draw_min_j) {
