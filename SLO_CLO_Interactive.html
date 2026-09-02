@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="tr">
 
 <head>
@@ -3588,9 +3588,30 @@
             let cfl_limit = 100000.0;
 
             let start_idx = Math.floor(OCEAN_Y / SCALE) * W_sim;
-            pixelData32.fill(0, 0, start_idx);
-            for (let i = start_idx; i < numCells; i++) {
-                let val = P[i];
+            pixelData32.fill(0); // Clear background to transparent
+            
+            let dt_phy_box = (SCALE / 6000.0) * dt;
+            let eikBox = getEikonalBox(cycle_t * dt_phy_box);
+            let draw_min_j = start_idx / W_sim;
+            let draw_max_j = H_sim - 1;
+            
+            if (useExpandingBox && eikBox && activeShots.length > 0) {
+                draw_min_j = useFreeSurface ? Math.max(draw_min_j, eikBox.min_j) : Math.max(0, eikBox.min_j);
+                draw_max_j = Math.min(H_sim - 1, eikBox.max_j);
+            }
+            
+            for (let j = draw_min_j; j <= draw_max_j; j++) {
+                let min_i = 0, max_i = W_sim - 1;
+                if (useExpandingBox && eikBox && eikBox.xMinZ && eikBox.xMaxZ) {
+                    min_i = Math.max(0, eikBox.xMinZ[j]);
+                    max_i = Math.min(W_sim - 1, eikBox.xMaxZ[j]);
+                    if (min_i > max_i) continue;
+                }
+                
+                let row_idx = j * W_sim;
+                for (let iter_i = min_i; iter_i <= max_i; iter_i++) {
+                    let i = row_idx + iter_i;
+                    let val = P[i];
 
                 // Courant Instability Detector
                 if (Number.isNaN(val) || Math.abs(val) > cfl_limit) {
@@ -3622,6 +3643,8 @@
                 pixelData32[i] = colormap32[lut_idx]; // Tek satırda 4 byte manipülasyonu
             }
 
+            if (instability) break;
+            }
             // Push buffer to offscreen
             fdtdCtx.putImageData(imgData, 0, 0);
 
