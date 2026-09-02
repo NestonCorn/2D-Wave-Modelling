@@ -2855,7 +2855,7 @@
                 // Blit GPU pixel buffer to canvas ImageData
                 if (!sismoOnlyMode && imgData && results.length > 1) {
                     pixelData.set(results[1]);
-                    fdtdCtx.putImageData(imgData, 0, 0);
+                    if(typeof eikBox !== 'undefined' && eikBox !== null){ blitFdtdImage(eikBox); } else { fdtdCtx.putImageData(imgData, 0, 0); }
                 }
                 // Update sismogram
                 sismo_data.set(siData);
@@ -3570,13 +3570,32 @@
             ctx.restore();
         }
 
+                function blitFdtdImage(eikBox) {
+            fdtdCtx.clearRect(0, 0, W_sim, H_sim);
+            if (useExpandingBox && eikBox) {
+                let sj_surf = Math.floor(OCEAN_Y / SCALE);
+                let dirtyX = Math.max(0, eikBox.min_i);
+                let dirtyY = useFreeSurface ? Math.max(sj_surf, eikBox.min_j) : Math.max(0, eikBox.min_j);
+                
+                let dirtyW = Math.max(1, eikBox.max_i - dirtyX + 1);
+                let dirtyH = Math.max(1, eikBox.max_j - dirtyY + 1);
+                
+                dirtyW = Math.min(dirtyW, W_sim - dirtyX);
+                dirtyH = Math.min(dirtyH, H_sim - dirtyY);
+                
+                fdtdCtx.putImageData(imgData, 0, 0, dirtyX, dirtyY, dirtyW, dirtyH);
+            } else {
+                fdtdCtx.putImageData(imgData, 0, 0);
+            }
+        }
+
         function drawFDTDToScreen() {
             if (sismoOnlyMode) return;
 
             // GPU mode: pixelData already populated by gpuLoop() readPixels()
             // Skip CPU P-array loop; just blit the already-filled imgData
             if (gpuReady && gpuEngine) {
-                fdtdCtx.putImageData(imgData, 0, 0);
+                if(typeof eikBox !== 'undefined' && eikBox !== null){ blitFdtdImage(eikBox); } else { fdtdCtx.putImageData(imgData, 0, 0); }
 
                 ctx.imageSmoothingEnabled = true;
                 ctx.globalCompositeOperation = 'source-over';
@@ -3646,7 +3665,7 @@
             if (instability) break;
             }
             // Push buffer to offscreen
-            fdtdCtx.putImageData(imgData, 0, 0);
+            if(typeof eikBox !== 'undefined' && eikBox !== null){ blitFdtdImage(eikBox); } else { fdtdCtx.putImageData(imgData, 0, 0); }
 
             // Scale up rendering over the CSS/background layers with smooth blending
             ctx.imageSmoothingEnabled = true;
