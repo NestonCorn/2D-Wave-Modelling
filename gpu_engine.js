@@ -632,7 +632,8 @@ class GPUEngine {
                 if (elapsed_sec >= 0 && elapsed_sec < max_sec) {
                     if (opts.wavelet_type === 'minphase') {
                         const omega = 2.0 * Math.PI * source_freq;
-                        val = 3.1 * Math.exp(-omega * elapsed_sec) * Math.sin(omega * elapsed_sec) * source_amp * dt * 0.4;
+                        // Slower decay (0.35) ensures a realistic ~33% negative trough
+                        val = 1.634 * Math.exp(-0.35 * omega * elapsed_sec) * Math.sin(omega * elapsed_sec) * source_amp * dt * 0.4;
                     } else {
                         const t    = elapsed_sec - delay_sec;
                         const pi2  = Math.PI * Math.PI;

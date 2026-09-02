@@ -340,10 +340,16 @@ self.onmessage = function(e) {
                     let delay_sec = 1.5 / source_freq;
                     let max_sec   = 3.0 / source_freq;
                     if (elapsed_sec >= 0 && elapsed_sec < max_sec) {
-                        let t    = elapsed_sec - delay_sec;
-                        let pi2  = Math.PI * Math.PI;
-                        let fpt2 = pi2 * source_freq * source_freq * t * t;
-                        let val  = (1.0 - 2.0 * fpt2) * Math.exp(-fpt2) * source_amp;
+                        let val = 0;
+                        if (msg.wavelet_type === 'minphase') {
+                            let omega = 2.0 * Math.PI * source_freq;
+                            val = 1.634 * Math.exp(-0.35 * omega * elapsed_sec) * Math.sin(omega * elapsed_sec) * source_amp;
+                        } else {
+                            let t    = elapsed_sec - delay_sec;
+                            let pi2  = Math.PI * Math.PI;
+                            let fpt2 = pi2 * source_freq * source_freq * t * t;
+                            val = (1.0 - 2.0 * fpt2) * Math.exp(-fpt2) * source_amp;
+                        }
                         let ship_src_dist = msg.ship_src_dist || 0;
                         let src_pos = ((shot.type === 'main') ? sxShip : sxSrc) - ship_src_dist;
                         let si = Math.floor(src_pos / SCALE);
