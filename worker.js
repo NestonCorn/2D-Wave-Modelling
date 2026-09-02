@@ -342,8 +342,8 @@ self.onmessage = function(e) {
                     if (elapsed_sec >= 0 && elapsed_sec < max_sec) {
                         let val = 0;
                         if (msg.wavelet_type === 'minphase') {
-                            let tau = 2.0 * Math.PI * source_freq * elapsed_sec;
-                            val = 2.67 * tau * (1.0 - tau / Math.PI) * Math.exp(-0.6 * tau) * source_amp;
+                            let tau = 8.0 * source_freq * elapsed_sec;
+                            val = 6.993 * tau * (1.0 - tau) * Math.exp(-1.3255 * tau) * source_amp;
                         } else {
                             let t    = elapsed_sec - delay_sec;
                             let pi2  = Math.PI * Math.PI;

@@ -631,9 +631,9 @@ class GPUEngine {
                 let   val         = 0;
                 if (elapsed_sec >= 0 && elapsed_sec < max_sec) {
                     if (opts.wavelet_type === 'minphase') {
-                        const tau = 2.0 * Math.PI * source_freq * elapsed_sec;
-                        // Single peak, single trough strictly non-oscillatory wavelet
-                        val = 2.67 * tau * (1.0 - tau / Math.PI) * Math.exp(-0.6 * tau) * source_amp * dt * 0.4;
+                        const tau = 8.0 * source_freq * elapsed_sec;
+                        // Symmetric one-peak (+1.0) one-trough (-1.0) strictly non-oscillatory wavelet
+                        val = 6.993 * tau * (1.0 - tau) * Math.exp(-1.3255 * tau) * source_amp * dt * 0.4;
                     } else {
                         const t    = elapsed_sec - delay_sec;
                         const pi2  = Math.PI * Math.PI;
