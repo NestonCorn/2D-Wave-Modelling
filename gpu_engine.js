@@ -316,6 +316,39 @@ fn pixels_convert(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 `;
 
+// --- buf_pixels → texture copy shader (avoids CPU readback entirely) ---------
+const WGSL_BUF_TO_TEX = /* wgsl */`
+struct BtParams { W: u32, H: u32, _p0: u32, _p1: u32 }
+@group(0) @binding(0) var<storage, read> src_buf : array<u32>;
+@group(0) @binding(1) var           dst_tex : texture_storage_2d<rgba8unorm, write>;
+@group(1) @binding(0) var<uniform>  btp     : BtParams;
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let x = gid.x; let y = gid.y;
+    if (x >= btp.W || y >= btp.H) { return; }
+    let p = src_buf[y * btp.W + x];
+    textureStore(dst_tex, vec2<u32>(x, y), vec4<f32>(
+        f32(p & 0xFFu)        / 255.0,
+        f32((p >>  8u) & 0xFFu) / 255.0,
+        f32((p >> 16u) & 0xFFu) / 255.0,
+        f32((p >> 24u) & 0xFFu) / 255.0
+    ));
+}
+`;
+
+// --- Full-screen blit: texture → swap chain -----------------------------------
+const WGSL_BLIT = /* wgsl */`
+@vertex fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
+    var p = array<vec2f,3>(vec2f(-1,-1), vec2f(3,-1), vec2f(-1,3));
+    return vec4f(p[vi], 0.0, 1.0);
+}
+@group(0) @binding(0) var wave_tex : texture_2d<f32>;
+@group(0) @binding(1) var wave_smp : sampler;
+@fragment fn fs(@builtin(position) fp: vec4f) -> @location(0) vec4f {
+    return textureSample(wave_tex, wave_smp, fp.xy / vec2f(textureDimensions(wave_tex)));
+}
+`;
+
 // ─── GPUEngine class ─────────────────────────────────────────────────────────
 class GPUEngine {
     constructor() {
@@ -342,7 +375,7 @@ class GPUEngine {
     // ── Public: full initialization ────────────────────────────────────────
     async init({ W_sim, H_sim, SCALE, dt, fd_order,
                  V_sq_cpu, b_x_cpu, a_x_cpu, b_z_cpu, a_z_cpu,
-                 N_REC, GH, OCEAN_Y, CABLE_LEN, N_OBS, obs_spacing }) {
+                 N_REC, GH, OCEAN_Y, CABLE_LEN, N_OBS, obs_spacing, renderCanvas }) {
 
         this.W_sim = W_sim; this.H_sim = H_sim; this.SCALE = SCALE;
         this.N_REC = N_REC; this.GH    = GH;
@@ -403,6 +436,22 @@ class GPUEngine {
         this._createBindGroups();
         this._writeParams(dt, 15.0);
         await this._ensurePipelines(fd_order);
+
+        // ── Direct GPU→canvas rendering (eliminates CPU readback) ─────────
+        this.gpuCtx = null;
+        if (renderCanvas) {
+            try {
+                const fmt = navigator.gpu.getPreferredCanvasFormat();
+                this.gpuCtx = renderCanvas.getContext('webgpu');
+                this.gpuCtx.configure({ device: this.device, format: fmt, alphaMode: 'premultiplied' });
+                this.canvasFormat = fmt;
+                await this._initBlitPipeline();
+                console.log(`[GPUEngine] Direct GPU→canvas render enabled (${fmt})`);
+            } catch (e) {
+                console.warn('[GPUEngine] Blit pipeline init failed, falling back to readback:', e.message);
+                this.gpuCtx = null;
+            }
+        }
 
         this.ready = true;
         console.log(`[GPUEngine] Ready on ${this.gpuLabel}`);
@@ -536,7 +585,91 @@ class GPUEngine {
         });
     }
 
-    // ── Pipeline compilation (one set per fd_order) ────────────────────────
+    // ── GPU→canvas direct render pipeline (no CPU readback) ───────────────
+    async _initBlitPipeline() {
+        const dev = this.device;
+        const W = this.W_sim;
+        const H = this.H_sim;
+        const S = GPUShaderStage.COMPUTE;
+
+        // waveTex: rgba8unorm storage texture (written by compute, sampled by render)
+        this.waveTex = dev.createTexture({
+            size: [W, H],
+            format: 'rgba8unorm',
+            usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+            label: 'wave_tex'
+        });
+
+        // buf_to_tex pipeline: reads buf_pixels, writes to waveTex
+        const btMod = dev.createShaderModule({ code: WGSL_BUF_TO_TEX, label: 'buf_to_tex' });
+        const btBGL = dev.createBindGroupLayout({
+            label: 'bt_bgl',
+            entries: [
+                { binding: 0, visibility: S, buffer: { type: 'read-only-storage' } },
+                { binding: 1, visibility: S, storageTexture: { access: 'write-only', format: 'rgba8unorm' } }
+            ]
+        });
+        const btParamBGL = dev.createBindGroupLayout({
+            label: 'bt_param_bgl',
+            entries: [{ binding: 0, visibility: S, buffer: { type: 'uniform', minBindingSize: 16 } }]
+        });
+        this.pip_bufToTex = await dev.createComputePipelineAsync({
+            layout: dev.createPipelineLayout({ bindGroupLayouts: [btBGL, btParamBGL] }),
+            compute: { module: btMod, entryPoint: 'main' }
+        });
+
+        // Uniform buffer for W, H (buf_to_tex shader)
+        this.buf_btParams = dev.createBuffer({
+            size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, label: 'bt_params'
+        });
+        dev.queue.writeBuffer(this.buf_btParams, 0, new Uint32Array([W, H, 0, 0]));
+
+        this.bg_bufToTex = dev.createBindGroup({
+            layout: btBGL,
+            entries: [
+                { binding: 0, resource: { buffer: this.buf_pixels } },
+                { binding: 1, resource: this.waveTex.createView() }
+            ]
+        });
+        this.bg_btParams = dev.createBindGroup({
+            layout: btParamBGL,
+            entries: [{ binding: 0, resource: { buffer: this.buf_btParams } }]
+        });
+
+        // blit render pipeline: samples waveTex, outputs to canvas swap chain
+        const blitMod = dev.createShaderModule({ code: WGSL_BLIT, label: 'blit' });
+        const blitBGL = dev.createBindGroupLayout({
+            label: 'blit_bgl',
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: {} },
+                { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: {} }
+            ]
+        });
+        this.pip_blit = await dev.createRenderPipelineAsync({
+            layout: dev.createPipelineLayout({ bindGroupLayouts: [blitBGL] }),
+            vertex:   { module: blitMod, entryPoint: 'vs' },
+            fragment: { module: blitMod, entryPoint: 'fs',
+                        targets: [{ format: this.canvasFormat,
+                                    blend: { color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+                                             alpha: { srcFactor: 'one',       dstFactor: 'one-minus-src-alpha', operation: 'add' } } }] },
+            primitive: { topology: 'triangle-list' }
+        });
+
+        this.wave_sampler = dev.createSampler({ magFilter: 'nearest', minFilter: 'nearest' });
+        this.bg_blit = dev.createBindGroup({
+            layout: blitBGL,
+            entries: [
+                { binding: 0, resource: this.waveTex.createView() },
+                { binding: 1, resource: this.wave_sampler }
+            ]
+        });
+
+        // Dispatch dimensions for full-grid buf_to_tex
+        this._btWx = Math.ceil(W / 16);
+        this._btWy = Math.ceil(H / 16);
+    }
+
+
     async _ensurePipelines(fd_order) {
         if (this._pipelineCache[fd_order]) {
             this._pipelines     = this._pipelineCache[fd_order];
@@ -759,15 +892,43 @@ class GPUEngine {
             pp.setPipeline(pip.pix); pp.setBindGroup(0, this.bg_fields);
             pp.setBindGroup(1, this.bg_params); pp.setBindGroup(2, this.bg_step, [0]);
             pp.dispatchWorkgroups(wx, wy); pp.end();
-        }
 
-        // Append readback copy immediately to the same encoder
-        if (!opts.sismoOnly) {
-            enc.copyBufferToBuffer(this.buf_pixels, 0, this.buf_pixRd,  0, W * H * 4);
+            if (this.gpuCtx) {
+                // ── Direct GPU→canvas path (zero CPU readback) ─────────────
+                // buf_to_tex: copy full buf_pixels into waveTex
+                const pb = enc.beginComputePass({ label: 'buf_to_tex' });
+                pb.setPipeline(this.pip_bufToTex);
+                pb.setBindGroup(0, this.bg_bufToTex);
+                pb.setBindGroup(1, this.bg_btParams);
+                pb.dispatchWorkgroups(this._btWx, this._btWy);
+                pb.end();
+
+                // blit: render waveTex → swap chain
+                const swapTex = this.gpuCtx.getCurrentTexture();
+                const rp = enc.beginRenderPass({
+                    colorAttachments: [{
+                        view: swapTex.createView(),
+                        clearValue: { r: 0, g: 0, b: 0, a: 0 },
+                        loadOp: 'clear', storeOp: 'store'
+                    }]
+                });
+                rp.setPipeline(this.pip_blit);
+                rp.setBindGroup(0, this.bg_blit);
+                rp.draw(3);
+                rp.end();
+                this._lastReadSize = undefined; // signal: no readback needed
+            } else {
+                // ── Fallback: CPU readback path ─────────────────────────────
+                const start_idx = bymin * W;
+                const size = (bymax - bymin + 1) * W * 4;
+                enc.copyBufferToBuffer(this.buf_pixels, start_idx * 4, this.buf_pixRd, start_idx * 4, size);
+                this._lastReadOffset = start_idx * 4;
+                this._lastReadSize = size;
+            }
         }
         enc.copyBufferToBuffer(this.buf_sismo,  0, this.buf_simoRd, 0, (this.N_REC * 2 + this.N_OBS) * this.GH * 4);
 
-        // Submit ALL physics + copy commands together
+        // Submit ALL physics + render commands together
         this.device.queue.submit([enc.finish()]);
 
         return result;
@@ -775,6 +936,23 @@ class GPUEngine {
 
     // ── Async readbacks (called after submitBatch resolves) ────────────────
     async readPixels() {
+        if (this._lastReadSize !== undefined) {
+            let offset = this._lastReadOffset;
+            let size = this._lastReadSize;
+            
+            // WebGPU mapAsync requires the offset to be a multiple of 8 bytes
+            const align_diff = offset % 8;
+            offset -= align_diff;
+            size += align_diff;
+            
+            // size must be a multiple of 4, which it is since original size was a multiple of 4, and align_diff is either 0 or 4.
+            await this.buf_pixRd.mapAsync(GPUMapMode.READ, offset, size);
+            const mapBuf = this.buf_pixRd.getMappedRange(offset, size);
+            const copy = new Uint8Array(mapBuf).slice(align_diff); // creates a copied Uint8Array
+            this.buf_pixRd.unmap();
+            
+            return { data: copy, offset: this._lastReadOffset, size: this._lastReadSize };
+        }
         await this.buf_pixRd.mapAsync(GPUMapMode.READ);
         const copy = this.buf_pixRd.getMappedRange().slice(0);
         this.buf_pixRd.unmap();

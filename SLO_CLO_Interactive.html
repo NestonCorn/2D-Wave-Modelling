@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="tr">
 
 <head>
@@ -1561,6 +1561,11 @@
                 try {
                     if (gpuEngine) { gpuEngine.destroy(); gpuEngine = null; }
 
+                    // ── Create dedicated WebGPU canvas for direct GPU rendering ──
+                    if (!wgpuCanvas) wgpuCanvas = document.createElement('canvas');
+                    wgpuCanvas.width  = W_sim;
+                    wgpuCanvas.height = H_sim;
+
                     gpuEngine = await new GPUEngine().init({
                         W_sim, H_sim, SCALE, dt, fd_order,
                         V_sq_cpu: V_sq,
@@ -1568,7 +1573,8 @@
                         b_z_cpu: bz, a_z_cpu: az,
                         N_REC, GH, OCEAN_Y,
                         CABLE_LEN: CABLE_LEN,
-                        N_OBS, obs_spacing: OBS_SPACING
+                        N_OBS, obs_spacing: OBS_SPACING,
+                        renderCanvas: wgpuCanvas
                     });
 
                     gpuReady = true;
@@ -1761,6 +1767,7 @@
         let W_sim, H_sim, numCells;
         let P, Vx, Vz, V_sq, Damp;
         let fdtdCanvas, fdtdCtx, imgData, pixelData, pixelData32;
+        let wgpuCanvas = null; // Dedicated WebGPU-context canvas for direct GPU→screen rendering
 
         // Profesyonel Sismik Diverging (Sıcak/Soğuk) Renk Paleti Look-Up Table (Hızlı Render için 32-bit önişleme)
         let colormap32 = new Uint32Array(2048);
@@ -2776,6 +2783,8 @@
                     // MUST await: clearWavefield/clearSismo are async GPU operations.
                     // Without await, submitBatch can race the clear causing mid-propagation corruption.
                     await gpuEngine.clearWavefield();
+                    if (fdtdCtx) fdtdCtx.clearRect(0, 0, W_sim, H_sim);
+                    if (pixelData32) pixelData32.fill(0);
                     await gpuEngine.clearSismo();
                     sismo_data.fill(0); clearGather();
                     await fireShot('main', sxShip - ship_src_dist);
@@ -2811,6 +2820,9 @@
 
                 // Submit all FDTD steps as one GPU command buffer
                 let eikBox = getEikonalBox((cycle_t + steps) * dt_phy);
+
+                // ── PERF TIMING ────────────────────────────────────────────────
+                const _t0 = performance.now();
                 const result = await gpuEngine.submitBatch({
                     steps, cycle_start: cycle_t, dt, dt_phy, mode, useFreeSurface, geologyMode: ui_geology_model === 'flat' ? 1 : ui_geology_model === 'fault' ? 2 : 0,
                     sxShip, sxSrc, activeShots,
@@ -2834,6 +2846,7 @@
                     box_ymin: eikBox.min_j,
                     box_ymax: eikBox.max_j
                 });
+                const _t1 = performance.now();
 
                 sxShip = result.sxShip;
                 sxSrc = result.sxSrc;
@@ -2845,20 +2858,37 @@
                     document.getElementById('shipXVal').textContent = Math.round(sxShip) + 'm';
                 }
 
-                // Parallel GPU readbacks
-                const tasks = [gpuEngine.readSismo()];
-                if (!sismoOnlyMode) tasks.push(gpuEngine.readPixels());
+                // ── GPU readback: sismo only (pixels rendered directly by GPU) ──
+                const _t2 = performance.now();
+                const siData = await gpuEngine.readSismo();
+                const _t3 = performance.now();
 
-                const results = await Promise.all(tasks);
-                const siData = results[0];
-
-                // Blit GPU pixel buffer to canvas ImageData
-                if (!sismoOnlyMode && imgData && results.length > 1) {
-                    pixelData.set(results[1]);
+                // If no gpuCtx (fallback path), also read pixels and blit to fdtdCtx
+                if (!gpuEngine.gpuCtx && !sismoOnlyMode && gpuEngine._lastReadSize !== undefined) {
+                    const pixRes = await gpuEngine.readPixels();
+                    if (pixRes && pixRes.data) {
+                        const u8 = new Uint8Array(pixelData.buffer, pixRes.offset, pixRes.size);
+                        u8.set(pixRes.data);
+                    } else if (pixRes) {
+                        pixelData.set(pixRes);
+                    }
                     fdtdCtx.putImageData(imgData, 0, 0);
                 }
-                // Update sismogram
+
                 sismo_data.set(siData);
+
+                // ── PERF log every 60 frames ──────────────────────────────────
+                if (!window._perfCount) window._perfCount = 0;
+                window._perfCount++;
+                if (window._perfCount % 60 === 0) {
+                    const box_cells = (eikBox.max_i - eikBox.min_i + 1) * (eikBox.max_j - eikBox.min_j + 1);
+                    const renderMode = gpuEngine.gpuCtx ? 'GPU-direct' : 'CPU-readback';
+                    console.log(
+                        `[PERF] Grid:${W_sim}x${H_sim} steps:${steps} box_cells:${box_cells} [${renderMode}]` +
+                        ` | submitBatch:${(_t1-_t0).toFixed(1)}ms` +
+                        ` | simoRead:${(_t3-_t2).toFixed(1)}ms`
+                    );
+                }
 
                 // Check CFL stability from P amplitude growth
                 if (!instability) {
@@ -2871,6 +2901,7 @@
 
                 drawSismogram();
                 drawScene();
+
 
             } catch (e) {
                 console.error('[gpuLoop]', e.message || e);
@@ -2942,6 +2973,8 @@
                 _segyShotSaved = false;
 
                 P.fill(0); Vx.fill(0); Vz.fill(0);
+                if (fdtdCtx) fdtdCtx.clearRect(0, 0, W_sim, H_sim);
+                if (pixelData32) pixelData32.fill(0);
                 sismo_data.fill(0);
                 resetCPML();
                 clearGather();
@@ -3576,12 +3609,13 @@
             // GPU mode: pixelData already populated by gpuLoop() readPixels()
             // Skip CPU P-array loop; just blit the already-filled imgData
             if (gpuReady && gpuEngine) {
-                fdtdCtx.putImageData(imgData, 0, 0);
-
-                ctx.imageSmoothingEnabled = true;
-                ctx.globalCompositeOperation = 'source-over';
-                ctx.drawImage(fdtdCanvas, 0, 0, W, H_main);
-                return;
+                // GPU mode: wavefield already rendered directly to wgpuCanvas by GPU
+            // No CPU readback or putImageData needed — just composite onto main canvas
+            const src = (gpuEngine && gpuEngine.gpuCtx && wgpuCanvas) ? wgpuCanvas : fdtdCanvas;
+            ctx.imageSmoothingEnabled = true;
+            ctx.globalCompositeOperation = 'source-over';
+            ctx.drawImage(src, 0, 0, W, H_main);
+            return;
             }
 
             let dG = display_gain / 15.0; // Önceden hesaplanmış çarpan
@@ -3646,7 +3680,14 @@
             if (instability) break;
             }
             // Push buffer to offscreen
-            fdtdCtx.putImageData(imgData, 0, 0);
+            let dirtyX = 0, dirtyY = 0, dirtyW = W_sim, dirtyH = H_sim;
+            if (useExpandingBox && eikBox && activeShots.length > 0) {
+                dirtyX = Math.max(0, eikBox.min_i);
+                dirtyY = draw_min_j;
+                dirtyW = Math.min(W_sim - 1, eikBox.max_i) - dirtyX + 1;
+                dirtyH = draw_max_j - dirtyY + 1;
+            }
+            fdtdCtx.putImageData(imgData, 0, 0, dirtyX, dirtyY, dirtyW, dirtyH);
 
             // Scale up rendering over the CSS/background layers with smooth blending
             ctx.imageSmoothingEnabled = true;
