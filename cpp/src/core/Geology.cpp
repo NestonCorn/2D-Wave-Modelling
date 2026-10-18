@@ -1,0 +1,71 @@
+#include "Geology.hpp"
+#include <cmath>
+
+void layerDepths(GeologyModel g, double x, double W, double H, double& sf, double& dp, double& sc) {
+    if (g == GeologyModel::Flat) {
+        sf = H * 0.52;
+        dp = H * 0.93;
+        sc = H * 10;                       // no salt
+    } else if (g == GeologyModel::Fault) {
+        // A fault down-throwing the right side, plus a regional dip
+        double faultPos = W / 2.0;
+        double throwAmt = H * 0.31;
+        double sf_base = H * 0.45;
+        double dp_base = H * 0.79;
+        sf = x < faultPos ? sf_base : sf_base + throwAmt;
+        dp = x < faultPos ? dp_base : dp_base + throwAmt;
+        sf += (x / W) * (H * 0.1);
+        dp += (x / W) * (H * 0.1);
+        sc = H * 10;
+    } else {
+        // Salt dome
+        double domScale = W * W * 0.00833;
+        sf = H * 0.45 + (x / W) * (H * 0.25);
+        dp = H * 0.875 - (x / W) * (H * 0.10);
+        sc = H * 1.08 - (H * 0.625) * std::exp(-std::pow(x - W / 2, 2) / domScale);
+        if (sc < sf + 10) sc = sf + 10;
+    }
+}
+
+GeoLayout buildLayout(GeologyModel g, double W, double H) {
+    GeoLayout L;
+    for (double x = -100; x <= W + 200; x += (W / 200)) {
+        double sf, dp, sc;
+        layerDepths(g, x, W, H, sf, dp, sc);
+        L.seafloor.push_back({(float)x, (float)sf});
+        L.deep.push_back({(float)x, (float)dp});
+        if (g == GeologyModel::Salt) L.salt.push_back({(float)x, (float)sc});
+    }
+    return L;
+}
+
+void fillVsq(std::vector<float>& vsq, int W_sim, int H_sim, double SCALE, GeologyModel g, double W, double H) {
+    vsq.assign((size_t)W_sim * H_sim, 0.0f);
+    std::vector<float> sf_arr(W_sim), dp_arr(W_sim), sc_arr(W_sim);
+    for (int i = 0; i < W_sim; i++) {
+        double sf, dp, sc;
+        layerDepths(g, i * SCALE, W, H, sf, dp, sc);
+        sf_arr[i] = (float)sf; dp_arr[i] = (float)dp; sc_arr[i] = (float)sc;   // Float32Array parity
+    }
+    for (int j = 0; j < H_sim; j++) {
+        double y = j * SCALE;
+        float* row = vsq.data() + (size_t)j * W_sim;
+        for (int i = 0; i < W_sim; i++) {
+            double v = 0.25;
+            if (y >= sc_arr[i]) v = 0.68;
+            else if (y >= dp_arr[i]) v = 0.48;
+            else if (y >= sf_arr[i]) v = 0.35;
+            row[i] = (float)(v * v);
+        }
+    }
+}
+
+double obsSeafloorDepth(GeologyModel g, double rx, double W, double H) {
+    if (g == GeologyModel::Flat) return H * 0.52;
+    if (g == GeologyModel::Fault) {
+        double faultPos = W / 2.0, throwAmt = H * 0.31;
+        double ry = rx < faultPos ? H * 0.45 : H * 0.45 + throwAmt;
+        return ry + (rx / W) * (H * 0.1);
+    }
+    return H * 0.45 + (rx / W) * (H * 0.25);
+}
