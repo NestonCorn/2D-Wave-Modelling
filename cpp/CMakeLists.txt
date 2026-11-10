@@ -83,7 +83,8 @@ add_executable(SeismicFDTD WIN32
     src/ui/Widgets.cpp
     src/ui/App.cpp
     src/ui/SceneView.cpp
-    src/ui/GatherView.cpp)
+    src/ui/GatherView.cpp
+    src/app.rc)
 target_include_directories(SeismicFDTD PRIVATE src ${pfd_SOURCE_DIR})
 target_link_libraries(SeismicFDTD PRIVATE fdtd_core imgui glfw opengl32)
 if(MSVC)

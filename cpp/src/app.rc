@@ -1,0 +1,3 @@
+// Application icon. The first icon resource is what Explorer shows for the exe
+// and its shortcuts; GLFW also loads "GLFW_ICON" for the window/taskbar icon.
+GLFW_ICON ICON "../assets/app.ico"
