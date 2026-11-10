@@ -52,6 +52,13 @@ std::string jsNum(double v) {
     return std::string(buf, r.ptr);
 }
 
+std::string jsNum(float v) {
+    if (v == std::floor(v) && std::fabs(v) < 1e7f) return std::to_string((long long)v);
+    char buf[64];
+    auto r = std::to_chars(buf, buf + sizeof(buf), v);
+    return std::string(buf, r.ptr);
+}
+
 std::vector<float> resampleGather(const float* sismo, size_t offset, int nTraces, int oldS, int newS) {
     std::vector<float> out((size_t)nTraces * newS);
     for (int tr = 0; tr < nTraces; tr++) {

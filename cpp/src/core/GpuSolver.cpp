@@ -83,7 +83,9 @@ bool GpuSolver::init(int W, int H, int nRec, int nObs, std::string& err) {
 
     glGenBuffers(1, &readback_);
     glBindBuffer(GL_COPY_WRITE_BUFFER, readback_);
-    glBufferData(GL_COPY_WRITE_BUFFER, std::max<size_t>(sismoSize_ * 4, 16), nullptr, GL_STREAM_READ);
+    glBufferData(GL_COPY_WRITE_BUFFER, (sismoSize_ + (size_t)W) * 4, nullptr, GL_STREAM_READ);   // sismo + probe row
+    probe_.assign(W, 0.0f);
+    probeValid_ = false;
 
     cpmlHost_.assign(2 * W + 2 * H, 0.0f);
     GLenum e = glGetError();
@@ -239,7 +241,13 @@ void GpuSolver::submit(const BatchJob& J, unsigned waveTex) {
     glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
     glBindBuffer(GL_COPY_READ_BUFFER, buf_[B_SISMO]);
     glBindBuffer(GL_COPY_WRITE_BUFFER, readback_);
-    glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0, sismoSize_ * 4);
+    if (sismoSize_) glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0, sismoSize_ * 4);
+    probeValid_ = J.probeRow >= 0 && J.probeRow < H_;
+    if (probeValid_) {
+        glBindBuffer(GL_COPY_READ_BUFFER, buf_[B_P]);
+        glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, (GLintptr)J.probeRow * W_ * 4,
+                            (GLintptr)sismoSize_ * 4, (GLsizeiptr)W_ * 4);
+    }
     fence_ = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
     glFlush();
 }
@@ -248,7 +256,15 @@ void GpuSolver::finishReadback() {
     glDeleteSync((GLsync)fence_);
     fence_ = nullptr;
     glBindBuffer(GL_COPY_WRITE_BUFFER, readback_);
-    glGetBufferSubData(GL_COPY_WRITE_BUFFER, 0, sismoSize_ * 4, sismo_.data());
+    if (sismoSize_) glGetBufferSubData(GL_COPY_WRITE_BUFFER, 0, sismoSize_ * 4, sismo_.data());
+    unstable_ = false;
+    if (probeValid_) {
+        glGetBufferSubData(GL_COPY_WRITE_BUFFER, (GLintptr)sismoSize_ * 4, (GLsizeiptr)W_ * 4, probe_.data());
+        for (float v : probe_) {
+            uint32_t bits; std::memcpy(&bits, &v, 4);
+            if ((bits & 0x7f800000u) == 0x7f800000u || (bits & 0x7fffffffu) > 0x47c35000u) { unstable_ = true; break; }   // NaN/Inf or |v| > 1e5
+        }
+    }
 }
 
 bool GpuSolver::poll() {

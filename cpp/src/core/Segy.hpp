@@ -27,5 +27,7 @@ std::vector<float> resampleGather(const float* sismo, size_t offset, int nTraces
 
 // JavaScript-style number → string (shortest round-trip, no trailing ".0")
 std::string jsNum(double v);
+// float overload: 0.1f prints as "0.1", not as its double expansion 0.10000000149011612
+std::string jsNum(float v);
 // Math.round semantics
 inline long long jsRound(double v) { return (long long)std::floor(v + 0.5); }

@@ -159,6 +159,46 @@ static void testPixels() {
     CHECK(visible > 100, "wavefield colormap empty");
 }
 
+static void testInstability(bool haveGpu) {
+    std::printf("[instability] probe row flags a CFL blow-up without pixels or recording\n");
+    Setup s = makeSetup(1200, 480, 4.0);
+    s.dt = 1.5;   // far above dt_max = 0.79 for O10
+    cpmlX(s.W, 40, s.dt, s.bx, s.ax);
+    cpmlZ(s.H, 40, s.dt, s.oceanY, s.SCALE, true, s.bz, s.az);
+    const size_t sismoSize = (size_t)(s.nRec * 2 + s.nObs) * 550;
+    auto st = makeSteps(s, 0, 600, 1e9);
+    for (auto& d : st) d.rec_valid = 0;   // recording window over: sismo check alone would miss it
+    BatchJob J = makeJob(s, st, 10);
+    J.probeRow = (int)st[0].sj0;
+    CpuSolver cpu;
+    cpu.init(s.W, s.H, 4, sismoSize);
+    cpu.setVsq(s.vsq);
+    cpu.setCpml(s.bx, s.ax, s.bz, s.az);
+    cpu.submit(J); cpu.wait();
+    CHECK(cpu.instabilityDetected(), "CPU blow-up not detected");
+    J.dt = 0.5f;   // stable run must stay clean
+    for (auto& d : st) d.val0 *= 0.5f / 1.5f;
+    cpu.clearFields(); cpu.clearPsi();
+    cpmlX(s.W, 40, 0.5, s.bx, s.ax);
+    cpmlZ(s.H, 40, 0.5, s.oceanY, s.SCALE, true, s.bz, s.az);
+    cpu.setCpml(s.bx, s.ax, s.bz, s.az);
+    cpu.submit(J); cpu.wait();
+    CHECK(!cpu.instabilityDetected(), "false alarm on a stable CPU run");
+    if (!haveGpu) return;
+    GpuSolver gpu;
+    std::string err;
+    if (!gpu.init(s.W, s.H, s.nRec, s.nObs, err) || !gpu.ensurePrograms(10, err)) { CHECK(false, "GPU init: %s", err.c_str()); return; }
+    gpu.setVsq(s.vsq);
+    gpu.setCpml(s.bx, s.ax, s.bz, s.az);
+    gpu.setObs(s.obsX, s.obsY);
+    gpu.submit(J, 0); gpu.wait();
+    CHECK(!gpu.instabilityDetected(), "false alarm on a stable GPU run");
+    J.dt = 1.5f;
+    gpu.clearFields(); gpu.clearPsi();
+    gpu.submit(J, 0); gpu.wait();
+    CHECK(gpu.instabilityDetected(), "GPU blow-up not detected");
+}
+
 static void testEikonal() {
     std::printf("[eikonal] expanding box grows monotonically and contains the source\n");
     Setup s = makeSetup(1200, 480, 4.0);
@@ -233,6 +273,11 @@ static void testJson() {
               h.geology == GeologyModel::Flat && h.domain_W == 2000 && h.sismo_ms == 3000 && ship == 600,
           "HTML values");
     CHECK(!paramsFromJson("{ bad json", h, ship, err), "malformed JSON must fail");
+    CHECK(jsNum(0.1f) == "0.1" && jsNum(6.25f) == "6.25" && jsNum(40.0f) == "40", "float formatting: %s", jsNum(0.1f).c_str());
+    SimParams n;
+    const float dh0 = n.dh;
+    CHECK(paramsFromJson(R"({"sl_dh": "nan", "sl_uiWidth": "inf", "sl_freq": 1e999})", n, ship, err) || true, "non-finite parse");
+    CHECK(n.dh == dh0 && n.domain_W == 1200.0f && n.freq == 50.0f, "non-finite values must be ignored");
 }
 
 static void bench(bool haveGpu) {
@@ -314,6 +359,7 @@ int main(int argc, char** argv) {
     }
     testParity(haveGpu);
     testPixels();
+    testInstability(haveGpu);
     testEikonal();
     testSegy();
     testJson();

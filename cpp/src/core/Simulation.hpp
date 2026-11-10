@@ -144,11 +144,13 @@ private:
     std::vector<float> bx_, ax_, bz_, az_;
     std::vector<float> obsX_, obsY_;
     double accumulated_ = 0;
+    double simTime_ = 0;             // simulated seconds since the cycle start (expanding-box clock; survives dt changes)
 
     // In-flight batch
     struct InFlight {
         bool active = false, gpu = false;
         int steps = 0;
+        double dtPhy = 0;
         double sxShip = 0, sxSrc = 0;
         BatchJob job;
     } inflight_;

@@ -40,6 +40,7 @@ public:
     void wait();          // blocking
 
     const std::vector<float>& sismo() const { return sismo_; }
+    bool instabilityDetected() const { return unstable_; }   // from the last batch's probe row
     void readP(std::vector<float>& out);   // tests only (blocking)
 
 private:
@@ -56,4 +57,6 @@ private:
     void* fence_ = nullptr;   // GLsync
     std::vector<float> sismo_;
     std::vector<float> cpmlHost_;
+    std::vector<float> probe_;
+    bool probeValid_ = false, unstable_ = false;
 };

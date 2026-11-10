@@ -1,3 +1,7 @@
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>   // before glad (APIENTRY); GlobalMemoryStatusEx
+#endif
 #include "Simulation.hpp"
 #include <glad/glad.h>
 #include <algorithm>
@@ -27,6 +31,14 @@ std::string isoStampForFolder() {
     char buf[32];
     std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H-%M-%S", &tm);
     return buf;
+}
+double physicalRamBytes() {
+#ifdef _WIN32
+    MEMORYSTATUSEX m{};
+    m.dwLength = sizeof(m);
+    if (GlobalMemoryStatusEx(&m)) return (double)m.ullTotalPhys;
+#endif
+    return 8e9;
 }
 const char* geoUpper(GeologyModel g) {
     return g == GeologyModel::Flat ? "FLAT" : g == GeologyModel::Fault ? "FAULT" : "SALT";
@@ -60,9 +72,25 @@ void Simulation::regridNow() {
     pendingSteps_ = 0;
     waitEikonal();
 
+    // Memory guard: the sliders allow e.g. 25 km x 12 km at 0.5 m (1.2 billion cells,
+    // ~65 GB). Coarsen the grid until the fields fit in half of the physical RAM
+    // (~56 bytes per cell: 8 float fields, pixels, V^2 copy, eikonal tables).
     SCALE = p.dh;
-    W_sim = (int)std::floor(p.domain_W / SCALE) + 1;
-    H_sim = (int)std::floor(p.domain_H / SCALE) + 1;
+    bool coarsened = false;
+    for (;;) {
+        W_sim = (int)std::floor(p.domain_W / SCALE) + 1;
+        H_sim = (int)std::floor(p.domain_H / SCALE) + 1;
+        if ((double)W_sim * H_sim * 56.0 <= 0.5 * physicalRamBytes() || SCALE >= 8.0) break;
+        SCALE = std::min(8.0, SCALE * 2.0);
+        coarsened = true;
+    }
+    if (coarsened) {
+        p.dh = (float)SCALE;
+        char msg[256];
+        std::snprintf(msg, sizeof(msg), "Bu alan boyutu ve ızgara aralığı bilgisayarın belleğine sığmıyor. "
+                      "Izgara aralığı otomatik olarak %g m yapıldı (%d x %d hücre).", SCALE, W_sim, H_sim);
+        alerts.push_back(msg);
+    }
     N_REC = (int)std::floor(p.cable_len / p.receiver_spacing) + 1;
     // The HTML only recomputed N_OBS when the OBS spacing changed; keeping it in
     // sync with the domain width avoids OBS stations outside the model.
@@ -113,7 +141,7 @@ void Simulation::initGPU() {
         return;
     }
     const long long bufBytes = (long long)W_sim * H_sim * 4;
-    if (bufBytes > maxSsbo_) {
+    if (bufBytes > maxSsbo_ || bufBytes * 9.0 > 0.35 * physicalRamBytes()) {
         gpuReady = false;
         char lbl[128];
         std::snprintf(lbl, sizeof(lbl), "ızgara çok büyük (%lldMB > %lldMB)", bufBytes / 1048576, maxSsbo_ / 1048576);
@@ -210,6 +238,7 @@ void Simulation::startMode(Mode m) {
     paused = false;
     mode = m;
     cycle_t = 0;
+    simTime_ = 0;
     accumulated_ = 0;
     shots.clear();
     shotsMain = shotsSrc = 0;
@@ -231,6 +260,7 @@ void Simulation::stopMode() {
     shots.clear();
     shotsMain = shotsSrc = 0;
     cycle_t = 0;
+    simTime_ = 0;
     accumulated_ = 0;
     instability = false;
     paused = false;
@@ -317,11 +347,15 @@ void Simulation::onReceiverSpacing(bool forceReset) {
 }
 
 void Simulation::onShipX(double x) {
+    waitInFlight(true);   // otherwise the running batch overwrites the new position when it completes
     sxShip = x;
     sxSrc = sxShip + p.src_offset;
 }
 
-void Simulation::onSourceOffset() { sxSrc = sxShip + p.src_offset; }
+void Simulation::onSourceOffset() {
+    waitInFlight(true);
+    sxSrc = sxShip + p.src_offset;
+}
 
 void Simulation::onGeology() {
     waitInFlight(true);
@@ -395,14 +429,18 @@ void Simulation::loopIteration() {
     const bool is_shot2 = (mode == Mode::CLO && cycle_t >= cur_t_max);
     const double t_local = is_shot2 ? cycle_t - cur_t_max : cycle_t;
 
-    // Auto-save SEG-Y exactly when the recording length is reached
-    if (segyRecording_ && t_local >= T_sismo && !segyShotSaved_) {
+    // Auto-save SEG-Y exactly when the recording length is reached. In CLO the save
+    // waits for the second ship's record: the HTML saved after the first half only,
+    // so the second ship's streamer gather was never written.
+    const bool recordDone = mode == Mode::CLO ? (is_shot2 && t_local >= T_sismo) : (t_local >= T_sismo);
+    if (segyRecording_ && recordDone && !segyShotSaved_) {
         segyShotSaved_ = true;
         segySnapshotAndSave();
     }
 
     if (cycle_t >= max_time) {
         cycle_t = std::fmod(cycle_t, max_time);
+        simTime_ = cycle_t * dt_phy;
         shots.clear();
         // Shot interval shorter than the recording length: save what we have first
         if (segyRecording_ && !segyShotSaved_) segySnapshotAndSave();
@@ -428,7 +466,9 @@ void Simulation::loopIteration() {
     const int steps = (int)stepsD;
 
     // CLO: fire the second ship when the first half completes (range check, multi-step jumps)
-    if (mode == Mode::CLO && cycle_t < cur_t_max && cycle_t + steps >= cur_t_max) fireShot(false, 0);
+    // The shot starts exactly at cur_t_max, where its record starts (the HTML used the batch
+    // start, shifting the second gather by up to one batch).
+    if (mode == Mode::CLO && cycle_t < cur_t_max && cycle_t + steps >= cur_t_max) fireShot(false, cur_t_max - cycle_t);
 
     if (eikDirty_) {
         startEikonal();
@@ -444,7 +484,7 @@ void Simulation::submitBatch(int steps) {
                                      : std::numeric_limits<double>::infinity();
     const double T_sismo = std::floor((p.sismo_ms * 6.0) / (SCALE * p.dt));
 
-    boxFor((cycle_t + steps) * dt_phy, batchBox_);
+    boxFor(simTime_ + steps * dt_phy, batchBox_);
     const bool rowsValid = p.expanding_box && batchBox_.hasRows;
 
     // ── Per-step source / receiver data (_prepareStepData) ──
@@ -499,6 +539,7 @@ void Simulation::submitBatch(int steps) {
     J.bxmin = batchBox_.min_i; J.bxmax = batchBox_.max_i;
     J.bymin = batchBox_.min_j; J.bymax = batchBox_.max_j;
     J.stepData = stepData_.data();
+    J.probeRow = std::clamp(sj_src, 0, H_sim - 1);
     J.N_REC = N_REC; J.N_OBS = N_OBS;
     J.cable_len = p.cable_len;
     J.SCALE = (float)SCALE;
@@ -535,6 +576,7 @@ void Simulation::submitBatch(int steps) {
     inflight_.active = true;
     inflight_.gpu = useGpu;
     inflight_.steps = steps;
+    inflight_.dtPhy = dt_phy;
     inflight_.sxShip = sx;
     inflight_.sxSrc = sxs;
     if (useGpu) gpu_.submit(J, waveTex);
@@ -544,11 +586,13 @@ void Simulation::submitBatch(int steps) {
 void Simulation::completeBatch() {
     inflight_.active = false;
     cycle_t += inflight_.steps;
+    simTime_ += inflight_.steps * inflight_.dtPhy;
     sxShip = inflight_.sxShip;
     sxSrc = inflight_.sxSrc;
 
     if (inflight_.gpu) {
         sismo = gpu_.sismo();
+        if (gpu_.instabilityDetected()) setInstability();
     } else {
         sismo = cpu_.sismo();
         const auto& st = cpu_.lastStats();
@@ -645,7 +689,7 @@ bool Simulation::boxFor(double t_sec, EikBox& out) const {
     return true;
 }
 
-bool Simulation::drawBox(EikBox& out) const { return boxFor(cycle_t * dtPhy(), out); }
+bool Simulation::drawBox(EikBox& out) const { return boxFor(simTime_, out); }
 
 NumericalStatus Simulation::numericalStatus() const {
     double c_sum = 1.0;
@@ -780,9 +824,24 @@ bool Simulation::applyConfigJson(const std::string& text, std::string& err) {
     np.dt = std::clamp(np.dt, 0.05f, 1.5f);
     np.npml = std::clamp(np.npml, 5, 60);
     if (np.fd_order != 2 && np.fd_order != 4 && np.fd_order != 6 && np.fd_order != 8) np.fd_order = 10;
-    np.receiver_spacing = std::max(np.receiver_spacing, 0.5f);
-    np.obs_spacing = std::max(np.obs_spacing, 10.0f);
-    np.freq = std::max(np.freq, 0.5f);
+    np.receiver_spacing = std::clamp(np.receiver_spacing, 3.125f, 100.0f);
+    np.obs_spacing = std::clamp(np.obs_spacing, 50.0f, 500.0f);
+    np.freq = std::clamp(np.freq, 0.5f, 250.0f);
+    np.amp = std::clamp(np.amp, 0.2f, 20.0f);
+    np.cable_len = std::clamp(np.cable_len, 50.0f, 1500.0f);
+    np.cable_head_depth = std::clamp(np.cable_head_depth, 2.0f, 100.0f);
+    np.cable_tail_depth = std::clamp(np.cable_tail_depth, 2.0f, 250.0f);
+    np.source_depth = std::clamp(np.source_depth, 2.0f, 50.0f);
+    np.src_offset = std::clamp(np.src_offset, 0.0f, 800.0f);
+    np.ship_src_dist = std::clamp(np.ship_src_dist, 0.0f, 300.0f);
+    np.src_rec_dist = std::clamp(np.src_rec_dist, 0.0f, 500.0f);
+    np.ship_speed_knots = std::clamp(np.ship_speed_knots, 0.0f, 12.0f);
+    np.shot_interval = std::clamp(np.shot_interval, 6.25f, 100.0f);
+    np.domain_W = std::clamp(np.domain_W, 800.0f, 25000.0f);   // a zero/negative domain crashed the grid setup
+    np.domain_H = std::clamp(np.domain_H, 400.0f, 12000.0f);
+    np.gain = std::clamp(np.gain, 1.0f, 100.0f);
+    np.speed_ms = std::clamp(np.speed_ms, 1.0f, 250.0f);
+    np.sismo_ms = std::clamp(np.sismo_ms, 500, 10000);
 
     stopMode();
     p = np;

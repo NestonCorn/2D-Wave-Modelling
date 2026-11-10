@@ -236,6 +236,13 @@ void CpuSolver::workerMain(int t) {
             default: runJob<10>(t); break;
         }
         if (job_.renderPixels) pixelPhase(t);
+        if (t == 0 && job_.probeRow >= 0 && job_.probeRow < H_) {
+            const float* row = P_.data() + (size_t)job_.probeRow * W_;
+            for (int i = 0; i < W_; i++) {
+                uint32_t bits; std::memcpy(&bits, &row[i], 4);
+                if ((bits & 0x7f800000u) == 0x7f800000u || std::fabs(row[i]) > 100000.0f) { unstable_ = true; break; }
+            }
+        }
         if (remaining_.fetch_sub(1, std::memory_order_acq_rel) == 1)
             busy_.store(false, std::memory_order_release);
     }

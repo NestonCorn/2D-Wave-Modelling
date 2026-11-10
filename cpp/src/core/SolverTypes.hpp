@@ -26,6 +26,9 @@ struct BatchJob {
     // Expanding box (inclusive bounds)
     int bxmin = 0, bxmax = 0, bymin = 0, bymax = 0;
     const StepData* stepData = nullptr;
+    // Row of P checked for NaN/Inf/blow-up after the batch (-1 = none). Works in
+    // turbo mode and after the recording window, unlike the pixel/sismo checks.
+    int probeRow = -1;
 
     // Receivers
     int N_REC = 0, N_OBS = 0;

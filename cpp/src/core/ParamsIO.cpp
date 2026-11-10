@@ -1,5 +1,6 @@
 #include "ParamsIO.hpp"
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
@@ -45,16 +46,22 @@ std::string paramsToJson(const SimParams& p, double shipX) {
     return j.dump(2);
 }
 
+// Bit test: this library is built with /fp:fast, which may fold std::isfinite away
+static bool finiteD(double v) {
+    uint64_t b; std::memcpy(&b, &v, 8);
+    return (b & 0x7ff0000000000000ull) != 0x7ff0000000000000ull;
+}
+
 static bool num(const ordered_json& j, const char* key, double& out) {
     auto it = j.find(key);
     if (it == j.end()) return false;
     try {
-        if (it->is_number()) { out = it->get<double>(); return true; }
+        if (it->is_number()) { double v = it->get<double>(); if (!finiteD(v)) return false; out = v; return true; }
         if (it->is_string()) {
             const std::string s = it->get<std::string>();
             char* end = nullptr;
             double v = std::strtod(s.c_str(), &end);
-            if (end == s.c_str()) return false;
+            if (end == s.c_str() || !finiteD(v)) return false;   // "nan"/"inf" would poison every clamp
             out = v;
             return true;
         }
@@ -107,9 +114,16 @@ bool paramsFromJson(const std::string& text, SimParams& p, double& shipX, std::s
 }
 
 std::string localParamsPath() {
-    const char* appdata = std::getenv("APPDATA");
+    // Wide API: getenv() returns the ANSI code page, which breaks (or mangles) profile
+    // paths with characters outside it; the rest of the app passes UTF-8 around.
+#ifdef _WIN32
+    const wchar_t* appdata = _wgetenv(L"APPDATA");
+#else
+    const char* appdata = std::getenv("HOME");
+#endif
     fs::path dir = appdata ? fs::path(appdata) / "SeismicFDTD" : fs::current_path();
-    return (dir / "params.json").string();
+    const std::u8string u8 = (dir / "params.json").u8string();
+    return std::string(u8.begin(), u8.end());
 }
 
 bool readTextFile(const std::string& path, std::string& out) {
