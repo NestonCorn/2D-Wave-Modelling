@@ -79,10 +79,12 @@ struct GatherView {
     float zoomX = 1, zoomY = 1, panX = 0, panY = 0;
     int dragTarget = 0;          // 0 none, 1 plot, 2 x-axis, 3 y-axis
     float startMx = 0, startMy = 0;
-    bool vd = false, smooth = false;
+    bool vd = true, smooth = true;   // smooth = bicubic (Catmull-Rom) VD resampling
     unsigned vdTex[3] = {0, 0, 0};
     int vdW[3] = {0, 0, 0}, vdH[3] = {0, 0, 0};
     std::vector<uint32_t> vdBuf;
+    std::vector<float> vdTmp, colW, rowW;   // bicubic scratch
+    std::vector<int> colIdx, rowIdx;
     void reset() { zoomX = zoomY = 1; panX = panY = 0; }
 };
 // panel 0 = streamer gather, 1 = OBS gather. Handles pan/zoom input on the panel.
