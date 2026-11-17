@@ -40,18 +40,6 @@ struct Colormap {
 };
 const Colormap& colormap() { static Colormap cm; return cm; }
 
-// 7x7 Gaussian source footprint, radius 3
-struct Gauss {
-    float w[7][7];
-    Gauss() {
-        for (int dj = -3; dj <= 3; dj++)
-            for (int di = -3; di <= 3; di++) {
-                int d = di * di + dj * dj;
-                w[dj + 3][di + 3] = d <= 9 ? (float)std::exp(-d / 2.0) : 0.0f;
-            }
-    }
-};
-const Gauss& gauss() { static Gauss g; return g; }
 
 inline void rowRange(int lo, int hi, int t, int n, int& r0, int& r1) {
     int count = std::max(0, hi - lo);
@@ -293,30 +281,31 @@ void CpuSolver::serialPhase(int s) {
     const StepData& sd = steps_[s];
     const int W = W_, H = H_;
     float* P = P_.data();
-    const Gauss& g = gauss();
 
-    // Source injection (main, then secondary)
+    // Source injection (main, then secondary) at a single cell. The HTML spread it over a
+    // 7x7 Gaussian (sigma = 1 cell), which low-passes the radiated wave by exp(-(k sigma)^2/2):
+    // a 50 Hz Ricker left the source at ~43 Hz, more at coarse grids. kSourceGain keeps the
+    // injected total (the sum of the old weights) so amplitudes stay comparable.
+    // Rows at/above the free surface are held at P = 0 and never receive source energy.
+    const int sjMinSrc = J.freeSurface ? J.sj_surf : -1;
     auto inject = [&](float si_f, float sj_f, float val) {
-        int si = (int)si_f, sj = (int)sj_f;
-        for (int dj = -3; dj <= 3; dj++)
-            for (int di = -3; di <= 3; di++) {
-                if (di * di + dj * dj > 9) continue;
-                int sjc = sj + dj, sic = si + di;
-                if (sic > 1 && sic < W - 1 && sjc > 1 && sjc < H - 1)
-                    P[(size_t)sjc * W + sic] += val * g.w[dj + 3][di + 3];
-            }
+        const int si = (int)si_f, sj = (int)sj_f;
+        if (si > 1 && si < W - 1 && sj > 1 && sj < H - 1 && sj > sjMinSrc) P[(size_t)sj * W + si] += val * kSourceGain;
     };
     if (sd.act0 > 0.5f) inject(sd.si0, sd.sj0, sd.val0);
     if (sd.act1 > 0.5f) inject(sd.si1, sd.sj1, sd.val1);
 
-    // Sismogram recording (max-abs per pixel row)
+    // Sismogram recording: each pixel row holds the mean of the ~T/GH steps that fall in it.
+    // (The HTML kept the max-abs sample, which aliased the wavelet into a jagged, sign-flipping
+    // pattern; the mean is a box low-pass and gives a smooth trace.)
     if (sd.rec_valid < 0.5f) return;
     const int gy = (int)sd.gy_pix;
     if (gy < 0 || gy >= GH) return;
     float* sis = sismo_.data();
+    const float w = sd.rec_w > 0.0f ? sd.rec_w : 1.0f;
     auto record = [&](int si, int sj, size_t idx) {
         float amp = (si > 0 && si < W && sj > 0 && sj < H) ? P[(size_t)sj * W + si] : 0.0f;
-        if (std::fabs(amp) > std::fabs(sis[idx])) sis[idx] = amp;
+        sis[idx] += amp * w;
     };
     const int off = (int)sd.sismo_off;
     const float spacing = J.N_REC > 1 ? J.cable_len / (float)(J.N_REC - 1) : 0.0f;

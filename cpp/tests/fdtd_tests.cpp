@@ -1,6 +1,7 @@
 // Headless checks + benchmark for the FDTD core.
 //   fdtd_tests            → run all tests (exit code 0 = pass)
 //   fdtd_tests --bench    → also run the steps/s benchmark
+//   fdtd_tests --snap DIR / --simsnap DIR MODE [minphase] / --pml / --trace FILE [minphase]  → wavefield snapshots (PGM) and CPML absorption check
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 #include <chrono>
@@ -17,6 +18,8 @@
 #include "core/GpuSolver.hpp"
 #include "core/ParamsIO.hpp"
 #include "core/Segy.hpp"
+#include "core/Simulation.hpp"
+#include "core/Wavelet.hpp"
 
 static int failures = 0;
 #define CHECK(cond, ...)                                              \
@@ -224,6 +227,53 @@ static void testEikonal() {
 static uint32_t be32(const uint8_t* p) { return (uint32_t)p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3]; }
 static uint16_t be16(const uint8_t* p) { return (uint16_t)(p[0] << 8 | p[1]); }
 
+// Target pulse value at time t (linear interpolation of the kPulseRate-per-period table)
+static double pulseAt(const std::vector<double>& tp, double f, double t) {
+    const double u = t * f * kPulseRate;
+    const size_t i = (size_t)u;
+    if (t < 0 || i + 1 >= tp.size()) return 0.0;
+    return tp[i] + (tp[i + 1] - tp[i]) * (u - (double)i);
+}
+
+// Both wavelets: zero area (no static pressure left at the source), unit peak, spectrum
+// peaking at the dominant frequency, and band-limited enough for the grid.
+static void testWavelets() {
+    std::printf("[wavelet] Ricker and minimum phase: zero DC, peak at f\n");
+    for (Wavelet w : {Wavelet::Ricker, Wavelet::MinPhase})
+        for (double f : {10.0, 50.0, 120.0}) {
+            const double dt = 1e-5;
+            std::vector<double> v;
+            const std::vector<double> tp = targetPulse(w, 3 * kPulseRate);
+            for (double t = 0; t < 3.0 / f; t += dt) v.push_back(pulseAt(tp, f, t));
+            double area = 0, peak = 0;
+            for (double x : v) { area += x * dt; peak = std::max(peak, std::fabs(x)); }
+            // Amplitude spectrum by direct DFT on a frequency grid
+            double best = 0, fBest = 0, e95 = 0, eTot = 0;
+            std::vector<double> spec;
+            for (double fr = 0; fr <= 8 * f; fr += f / 50) {
+                double re = 0, im = 0;
+                for (size_t k = 0; k < v.size(); k++) {
+                    const double ph = 2 * M_PI * fr * k * dt;
+                    re += v[k] * std::cos(ph); im -= v[k] * std::sin(ph);
+                }
+                const double a = std::hypot(re, im);
+                spec.push_back(a * a);
+                eTot += a * a;
+                if (a > best) { best = a; fBest = fr; }
+            }
+            double acc = 0; int k95 = 0;
+            for (; k95 < (int)spec.size() && acc < 0.95 * eTot; k95++) acc += spec[k95];
+            e95 = k95 * f / 50;
+            const char* name = w == Wavelet::Ricker ? "ricker" : "minphase";
+            std::printf("  %-8s f=%5.1f  peak=%.3f  area*f=%.1e  spectral peak=%.1f Hz  f95=%.0f Hz\n", name, f, peak,
+                        area * f, fBest, e95);
+            CHECK(std::fabs(peak - 1.0) < 1e-3, "%s f=%g: peak %.4f", name, f, peak);
+            CHECK(std::fabs(area * f) < 1e-3, "%s f=%g: non-zero area %.2e", name, f, area * f);
+            CHECK(std::fabs(fBest - f) <= 0.05 * f, "%s f=%g: spectral peak at %.1f Hz", name, f, fBest);
+            CHECK(e95 < 3.0 * f, "%s f=%g: too broadband (95%% energy below %.0f Hz)", name, f, e95);
+        }
+}
+
 static void testSegy() {
     std::printf("[segy] Rev1 layout\n");
     std::vector<float> tr(3 * 100);
@@ -337,6 +387,181 @@ static void bench(bool haveGpu) {
     }
 }
 
+// --snap DIR: write P snapshots (PGM, gray = 128 + P*gain) of the default scene, CPU and GPU
+static void writePgm(const std::string& path, const std::vector<float>& P, int W, int H, float gain) {
+    FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) return;
+    std::fprintf(f, "P5\n%d %d\n255\n", W, H);
+    std::vector<unsigned char> row(W);
+    for (int j = 0; j < H; j++) {
+        for (int i = 0; i < W; i++) {
+            float v = std::max(-1.0f, std::min(1.0f, P[(size_t)j * W + i] * gain));
+            row[i] = (unsigned char)std::lround(127.5f + v * 127.5f);
+        }
+        std::fwrite(row.data(), 1, W, f);
+    }
+    std::fclose(f);
+}
+
+static void snapshots(const std::string& dir, bool haveGpu) {
+    Setup s = makeSetup(1200, 480, 4.0);
+    const size_t sismoSize = (size_t)(s.nRec * 2 + s.nObs) * 550;
+    CpuSolver cpu;
+    cpu.init(s.W, s.H, 4, sismoSize);
+    cpu.setVsq(s.vsq);
+    cpu.setCpml(s.bx, s.ax, s.bz, s.az);
+    GpuSolver gpu;
+    std::string err;
+    const bool g = haveGpu && gpu.init(s.W, s.H, s.nRec, s.nObs, err) && gpu.ensurePrograms(10, err);
+    if (g) { gpu.setVsq(s.vsq); gpu.setCpml(s.bx, s.ax, s.bz, s.az); gpu.setObs(s.obsX, s.obsY); }
+    int done = 0;
+    for (int target : {150, 300, 600, 1200, 2400}) {
+        auto st = makeSteps(s, done, target - done, 12000);
+        BatchJob J = makeJob(s, st, 10);
+        cpu.submit(J); cpu.wait();
+        if (g) { gpu.submit(J, 0); gpu.wait(); }
+        done = target;
+        writePgm(dir + "/cpu_" + std::to_string(target) + ".pgm", cpu.P(), s.W, s.H, 20.0f);
+        if (g) { std::vector<float> gp; gpu.readP(gp); writePgm(dir + "/gpu_" + std::to_string(target) + ".pgm", gp, s.W, s.H, 20.0f); }
+        float pmax = 0;
+        for (float v : cpu.P()) pmax = std::max(pmax, std::fabs(v));
+        std::printf("step %d  t=%.1f ms  max|P|=%.4g\n", target, target * s.SCALE / 6000.0 * s.dt * 1000.0, pmax);
+    }
+    if (g) gpu.destroy();
+}
+
+// --simsnap DIR MODE: run the full controller (CPU) with the expanding box on and off and
+// dump P at a few simulated times, plus the box-on vs box-off difference.
+static void simSnapshots(const std::string& dir, int modeIdx, bool minPhase) {
+    const Mode m = modeIdx == 0 ? Mode::CLO : modeIdx == 1 ? Mode::SLO : Mode::Trad;
+    std::vector<std::vector<float>> runs[2];
+    int W = 0, H = 0;
+    for (int box = 0; box < 2; box++) {
+        Simulation sim;
+        sim.p.expanding_box = box == 1;
+        if (minPhase) sim.p.wavelet = Wavelet::MinPhase;
+        sim.init(false);
+        W = sim.W_sim; H = sim.H_sim;
+        sim.startMode(m);
+        double now = 0;
+        for (double tms : {100.0, 200.0, 350.0, 600.0}) {
+            while (sim.cycle_t * sim.dtPhy() * 1000.0 < tms) { now += 1.0 / 60; sim.update(now, 1.0 / 60); }
+            sim.cpuSolver().wait();
+            runs[box].push_back(sim.cpuSolver().P());
+            writePgm(dir + "/sim_m" + std::to_string(modeIdx) + (minPhase ? "mp" : "") + (box ? "_box_" : "_full_") + std::to_string((int)tms) + ".pgm",
+                     sim.cpuSolver().P(), W, H, 20.0f);
+            std::printf("box=%d t=%.1f ms (target %.0f) ship=%.1f\n", box, sim.cycle_t * sim.dtPhy() * 1000.0, tms, sim.sxShip);
+        }
+    }
+    for (size_t k = 0; k < runs[0].size(); k++) {
+        double mx = 0, md = 0;
+        for (size_t i = 0; i < runs[0][k].size(); i++) {
+            mx = std::max(mx, (double)std::fabs(runs[0][k][i]));
+            md = std::max(md, (double)std::fabs(runs[0][k][i] - runs[1][k][i]));
+        }
+        std::printf("snap %zu: max|P| full=%.4g  max|full-box|=%.4g (rel %.2e)\n", k, mx, md, mx > 0 ? md / mx : 0);
+    }
+}
+
+// --pml: absorption check in a homogeneous medium (free surface off, CPML on all sides).
+// Reports the largest interior |P| after the direct wave has left, relative to its peak.
+static void pmlCheck() {
+    for (int order : {2, 10}) for (float v : {0.25f, 0.48f, 0.68f}) {
+        Setup s = makeSetup(1200, 480, 4.0);
+        std::fill(s.vsq.begin(), s.vsq.end(), v * v);
+        cpmlZ(s.H, 40, s.dt, s.oceanY, s.SCALE, false, s.bz, s.az);
+        const size_t sismoSize = (size_t)(s.nRec * 2 + s.nObs) * 550;
+        CpuSolver cpu;
+        cpu.init(s.W, s.H, 4, sismoSize);
+        cpu.setVsq(s.vsq);
+        cpu.setCpml(s.bx, s.ax, s.bz, s.az);
+        const int cross = (int)(260 / (v * s.dt));   // steps to travel 260 cells (well past every boundary)
+        double peak = 0, late = 0;
+        int done = 0;
+        while (done < cross * 2) {
+            int n = std::min(200, cross * 2 - done);
+            auto st = makeSteps(s, done, n, 1e9);
+            for (auto& d : st) d.sj0 = (float)(s.H / 2);
+            BatchJob J = makeJob(s, st, order);
+            J.freeSurface = false;
+            cpu.submit(J); cpu.wait();
+            done += n;
+            double mx = 0;
+            for (int j = 40; j < s.H - 40; j++)
+                for (int i = 40; i < s.W - 40; i++) mx = std::max(mx, (double)std::fabs(cpu.P()[(size_t)j * s.W + i]));
+            if (done <= cross / 4) peak = std::max(peak, mx);
+            if (done >= cross) late = std::max(late, mx);
+        }
+        std::printf("O%-2d v=%.2f  peak=%.4g  residual after exit=%.4g  (%.2f%%)\n", order, v, peak, late, 100 * late / peak);
+    }
+}
+
+// Radiated pulse: homogeneous water, no free surface, 50 Hz source at the centre, P recorded
+// 60 cells to the right. Returns the best normalised correlation with the target pulse
+// (any lag, sign kept) and optionally writes "injected target received" per step.
+static double radiatedPulse(Wavelet w, const char* dumpPath = nullptr, double* peakHz = nullptr) {
+    Setup s = makeSetup(1200, 480, 4.0);
+    std::fill(s.vsq.begin(), s.vsq.end(), 0.0625f);
+    cpmlZ(s.H, 40, s.dt, s.oceanY, s.SCALE, false, s.bz, s.az);
+    CpuSolver cpu;
+    cpu.init(s.W, s.H, 4, (size_t)(s.nRec * 2 + s.nObs) * 550);
+    cpu.setVsq(s.vsq);
+    cpu.setCpml(s.bx, s.ax, s.bz, s.az);
+    const double f = 50, dtp = s.SCALE / 6000.0 * s.dt;
+    SourcePulse pulse;
+    pulse.build(w, f);
+    const std::vector<double> tp = targetPulse(w, 3 * kPulseRate);
+    const int sj = s.H / 2, si = s.W / 2, n = 1500;
+    std::vector<double> inj(n), tgt(n), rec(n);
+    for (int k = 0; k < n; k++) {
+        auto st = makeSteps(s, k, 1, 1e9);
+        const double t = (k + 1) * dtp;
+        inj[k] = pulse(t);
+        tgt[k] = pulseAt(tp, f, t);
+        st[0].val0 = (float)(inj[k] * 2.0 * s.dt * 0.4);
+        st[0].act0 = st[0].val0 != 0 ? 1.f : 0.f;
+        st[0].sj0 = (float)sj;
+        BatchJob J = makeJob(s, st, 10);
+        J.freeSurface = false;
+        cpu.submit(J); cpu.wait();
+        rec[k] = cpu.P()[(size_t)sj * s.W + si + 60];
+    }
+    if (dumpPath) {
+        FILE* fo = std::fopen(dumpPath, "w");
+        for (int k = 0; k < n; k++) std::fprintf(fo, "%g %g %g\n", inj[k], tgt[k], rec[k]);
+        std::fclose(fo);
+    }
+    if (peakHz) {   // spectral peak of the received pulse
+        double bestA = 0;
+        for (double fr = 1; fr <= 200; fr += 0.5) {
+            double re = 0, im = 0;
+            for (int k = 0; k < n; k++) { re += rec[k] * std::cos(2 * M_PI * fr * k * dtp); im -= rec[k] * std::sin(2 * M_PI * fr * k * dtp); }
+            const double a = std::hypot(re, im);
+            if (a > bestA) { bestA = a; *peakHz = fr; }
+        }
+    }
+    double nt = 0, nr = 0, best = -2;
+    for (int k = 0; k < n; k++) { nt += tgt[k] * tgt[k]; nr += rec[k] * rec[k]; }
+    for (int lag = 0; lag < 800; lag++) {
+        double c = 0;
+        for (int k = 0; k + lag < n; k++) c += tgt[k] * rec[k + lag];
+        best = std::max(best, c / std::sqrt(nt * nr));
+    }
+    return best;
+}
+
+static void testRadiatedPulse() {
+    std::printf("[radiation] pulse 60 cells from the source matches the selected wavelet\n");
+    for (Wavelet w : {Wavelet::Ricker, Wavelet::MinPhase}) {
+        double fPeak = 0;
+        const double c = radiatedPulse(w, nullptr, &fPeak);
+        const char* name = w == Wavelet::Ricker ? "ricker" : "minphase";
+        std::printf("  %-8s correlation with target pulse = %.4f  radiated peak %.1f Hz (set 50 Hz)\n", name, c, fPeak);
+        CHECK(c > 0.99, "%s: radiated pulse differs from the wavelet (corr %.4f)", name, c);
+        CHECK(std::fabs(fPeak - 50) <= 2.5, "%s: radiated dominant frequency %.1f Hz instead of 50", name, fPeak);
+    }
+}
+
 int main(int argc, char** argv) {
     const bool doBench = argc > 1 && std::string(argv[1]) == "--bench";
     bool haveGpu = false;
@@ -357,10 +582,30 @@ int main(int argc, char** argv) {
             }
         }
     }
+    if (argc > 3 && std::string(argv[1]) == "--simsnap") {
+        simSnapshots(argv[2], std::atoi(argv[3]), argc > 4 && std::string(argv[4]) == "minphase");
+        if (win) glfwDestroyWindow(win);
+        glfwTerminate();
+        return 0;
+    }
+    if (argc > 2 && std::string(argv[1]) == "--trace") {
+        radiatedPulse(argc > 3 && std::string(argv[3]) == "minphase" ? Wavelet::MinPhase : Wavelet::Ricker, argv[2]);
+        glfwTerminate();
+        return 0;
+    }
+    if (argc > 1 && std::string(argv[1]) == "--pml") { pmlCheck(); glfwTerminate(); return 0; }
+    if (argc > 2 && std::string(argv[1]) == "--snap") {
+        snapshots(argv[2], haveGpu);
+        if (win) glfwDestroyWindow(win);
+        glfwTerminate();
+        return 0;
+    }
     testParity(haveGpu);
     testPixels();
     testInstability(haveGpu);
     testEikonal();
+    testWavelets();
+    testRadiatedPulse();
     testSegy();
     testJson();
     if (doBench) bench(haveGpu);

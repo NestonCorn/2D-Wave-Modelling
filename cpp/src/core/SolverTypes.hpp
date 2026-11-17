@@ -4,6 +4,9 @@
 
 // Per-step source / receiver data, precomputed on the CPU once per batch and
 // consumed by both engines (64 bytes, std430-compatible; mirrors StepData in gpu_engine.js).
+// Point-source gain: sum of the 7x7 Gaussian footprint weights the HTML used (amplitude parity)
+constexpr float kSourceGain = 6.21336f;
+
 struct StepData {
     float si0, sj0, val0, act0;     // main shot cell, wavelet * dt * 0.4, active flag
     float si1, sj1, val1, act1;     // secondary shot (SLO src / CLO second ship)
@@ -13,7 +16,7 @@ struct StepData {
     float rec_valid;                // 1 = record this step
     float ry_head, ry_tail;         // cable head / tail depth (absolute, m)
     float cable_head_x;             // x of the cable head (m)
-    float _pad;
+    float rec_w;                    // 1 / (steps that fall in row gy_pix): a row stores the mean of its steps
 };
 static_assert(sizeof(StepData) == 64, "StepData must be 64 bytes");
 

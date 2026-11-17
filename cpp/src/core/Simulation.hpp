@@ -9,6 +9,7 @@
 #include "Geology.hpp"
 #include "GpuSolver.hpp"
 #include "Params.hpp"
+#include "Wavelet.hpp"
 
 struct Shot { bool main; double t0; };
 
@@ -155,6 +156,7 @@ private:
         BatchJob job;
     } inflight_;
     std::vector<StepData> stepData_;
+    SourcePulse pulse_;              // injected source time function (rebuilt when wavelet / f change)
     EikBox batchBox_;
     int pendingSteps_ = 0;           // batch waiting for the eikonal solve
 

@@ -19,7 +19,7 @@ struct StepData {
     float si0, sj0, val0, act0;
     float si1, sj1, val1, act1;
     float sxShip, gy_pix, sismo_off, rec_valid;
-    float ry_head, ry_tail, cable_head_x, pad;
+    float ry_head, ry_tail, cable_head_x, rec_w;
 };
 layout(std430, binding = 10) readonly buffer B10 { StepData steps[]; };
 layout(std430, binding = 11) readonly buffer B11 { vec2 obsPos[]; };  // OBS x, depth (m)
@@ -104,21 +104,14 @@ void main() {
 }
 )GLSL";
 
-// Phase 3b: source injection over the 7x7 Gaussian footprint (radius 3).
-// A single invocation walks both shots so overlapping footprints never race
-// (the WGSL version used 49 threads, which could collide when ships overlap).
+// Phase 3b: point-source injection (see CpuSolver::serialPhase). A single invocation
+// handles both shots so coinciding sources never race.
 inline const char* kSource = R"GLSL(
 layout(local_size_x = 1) in;
 void inject(float sif, float sjf, float val) {
-    int si0 = int(sif), sj0 = int(sjf);
-    for (int dj = -3; dj <= 3; dj++)
-        for (int di = -3; di <= 3; di++) {
-            int dsq = di * di + dj * dj;
-            if (dsq > 9) continue;
-            int si = si0 + di, sj = sj0 + dj;
-            if (si > 1 && si < W - 1 && sj > 1 && sj < H - 1)
-                P[sj * W + si] += val * exp(-float(dsq) / 2.0);
-        }
+    int si = int(sif), sj = int(sjf);
+    if (si > 1 && si < W - 1 && sj > 1 && sj < H - 1 && (freeSurf == 0 || sj > sjSurf))
+        P[sj * W + si] += val * 6.21336;   // kSourceGain
 }
 void main() {
     StepData s = steps[uStep];
@@ -151,7 +144,7 @@ void main() {
     int si = int(floor(rx / scale)), sj = int(floor(ry / scale));
     float amp = (si > 0 && si < W && sj > 0 && sj < H) ? P[sj * W + si] : 0.0;
     int idx = base + gy;
-    if (abs(amp) > abs(sismo[idx])) sismo[idx] = amp;
+    sismo[idx] += amp * (s.rec_w > 0.0 ? s.rec_w : 1.0);   // mean over the row's steps
 }
 )GLSL";
 

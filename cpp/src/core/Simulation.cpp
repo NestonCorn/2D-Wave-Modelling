@@ -492,6 +492,7 @@ void Simulation::submitBatch(int steps) {
     const double ship_step = mps * dt_phy;
     double sx = sxShip, sxs = sxSrc;
     const double f = p.freq;
+    if (!pulse_.matches(p.wavelet, f)) pulse_.build(p.wavelet, f);
     const int sj_src = (int)std::floor((OCEAN_Y + p.source_depth) / SCALE);
     for (int s = 0; s < steps; s++) {
         StepData& d = stepData_[s];
@@ -500,18 +501,7 @@ void Simulation::submitBatch(int steps) {
         sxs += ship_step;
         for (const Shot& sh : shots) {
             const double elapsed = (cyc - sh.t0) * dt_phy;
-            const double delay = 1.5 / f, maxs = 3.0 / f;
-            double val = 0;
-            if (elapsed >= 0 && elapsed < maxs) {
-                if (p.wavelet == Wavelet::MinPhase) {
-                    double tau = 8.0 * f * elapsed;
-                    val = 6.993 * tau * (1.0 - tau) * std::exp(-1.3255 * tau) * p.amp * p.dt * 0.4;
-                } else {
-                    double t = elapsed - delay;
-                    double fpt2 = M_PI * M_PI * f * f * t * t;
-                    val = (1.0 - 2.0 * fpt2) * std::exp(-fpt2) * p.amp * p.dt * 0.4;
-                }
-            }
+            const double val = pulse_(elapsed) * p.amp * p.dt * 0.4;
             const double src_pos = (sh.main ? sx : sxs) - p.ship_src_dist;
             const float si = (float)std::floor(src_pos / SCALE);
             if (sh.main) { d.si0 = si; d.sj0 = (float)sj_src; d.val0 = (float)val; d.act0 = val != 0 ? 1.f : 0.f; }
@@ -522,6 +512,11 @@ void Simulation::submitBatch(int steps) {
         int gy = (int)std::floor((t_local / T_sismo) * GH);
         d.rec_valid = (mode != Mode::None && t_local <= T_sismo && gy >= 0 && gy < GH) ? 1.f : 0.f;
         d.gy_pix = (float)gy;
+        {   // number of recorded steps (integer t_local in [1, T_sismo]) that map to row gy
+            const double lo = std::max(1.0, std::ceil(gy * T_sismo / GH));
+            const double hi = std::min(T_sismo, std::ceil((gy + 1) * T_sismo / GH) - 1.0);
+            d.rec_w = (float)(1.0 / std::max(1.0, hi - lo + 1.0));
+        }
         d.sismo_off = shot2 ? (float)(N_REC * GH) : 0.f;
         d.sxShip = (float)sx;
         d.ry_head = (float)(OCEAN_Y + p.cable_head_depth);
