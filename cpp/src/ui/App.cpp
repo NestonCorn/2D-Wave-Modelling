@@ -57,6 +57,15 @@ int autoColumns(float minW, int maxCols) {
     return std::clamp((int)(avail / S(minW)), 1, maxCols);
 }
 
+// Tooltip with its own padding: the tooltip window takes the WindowPadding active at the
+// call site (0 in the header, the page margin inside the scroll area, which made it
+// hundreds of pixels wide with the text floating in the middle).
+void tooltip(const char* text) {
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(10), S(6)));
+    ImGui::SetTooltip("%s", text);
+    ImGui::PopStyleVar();
+}
+
 } // namespace
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -166,7 +175,7 @@ float App::header() {
     if (ImGui::IsItemClicked()) sim_.toggleComputeEngine();
     if (hov) {
         ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-        ImGui::SetTooltip("Tıkla CPU/GPU değiştir");
+        tooltip("Tıkla CPU/GPU değiştir");
         dl->AddRectFilled(ImVec2(bx - S(3), by - S(3)), ImVec2(bx + bw + S(3), by + bh + S(3)), rgba(0, 132, 255, 0.15f), S(8));
     }
     dl->AddRectFilled(ImVec2(bx, by), ImVec2(bx + bw, by + bh), bg, S(6));
@@ -603,7 +612,10 @@ void App::canvasSection() {
     SimParams& p = sim_.p;
     const float w = ImGui::GetContentRegionAvail().x;
     const float k = w / p.domain_W;
-    const float ch = p.domain_H * k;
+    // True aspect ratio, but kept between 1/4 and 1x the width: a 25 km x 400 m domain
+    // otherwise became a ~20 px strip, and a narrow, deep one a canvas many screens tall.
+    const float ch = std::clamp(p.domain_H * k, w * 0.25f, w);
+    const float ky = ch / p.domain_H;
     const float stripH = S(52);
     ImVec2 o = ImGui::GetCursorScreenPos();
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -611,7 +623,7 @@ void App::canvasSection() {
 
     dl->AddRectFilled(o, ImVec2(o.x + w, o.y + ch + stripH), hex(0x020812), R);
     dl->PushClipRect(o, ImVec2(o.x + w, o.y + ch), true);
-    drawScene(sim_, dl, o, k, overlay_);
+    drawScene(sim_, dl, o, k, ky, overlay_);
     dl->PopClipRect();
     ImGui::Dummy(ImVec2(w, ch));
     const ImVec2 after = ImGui::GetCursorScreenPos();
@@ -651,7 +663,7 @@ void App::canvasSection() {
         ImGui::InvisibleButton("##overlay", ImVec2(bs, bs));
         const bool hov = ImGui::IsItemHovered();
         if (ImGui::IsItemClicked()) overlay_ = (overlay_ + 1) % 3;
-        if (hov) ImGui::SetTooltip("Yazıları Gizle / Göster");
+        if (hov) tooltip("Yazıları Gizle / Göster");
         const float alpha = hov ? 1.0f : 0.25f;
         dl->AddRectFilled(a, ImVec2(a.x + bs, a.y + bs), rgba(4, 16, 34, 0.78f * alpha), S(8));
         ImVec4 bc = vec(borders[overlay_]);
@@ -798,7 +810,7 @@ void App::gatherSection() {
         ImGui::BeginChild("##timeRow", ImVec2(rowW, ImGui::GetFrameHeight()), 0, ImGuiWindowFlags_NoBackground);
         ImGui::PushStyleColor(ImGuiCol_Text, vec(hex(0x00e5a0)));
         float ms = (float)p.sismo_ms;
-        if (ParamRow("⏱ Y-Ekseni (Zaman) Sınırı (ms):", "sismoT", &ms, 1000, 6000, 500, "%.0f")) p.sismo_ms = (int)std::lround(ms);
+        if (ParamRow("⏱ Y-Ekseni (Zaman) Sınırı (ms):", "sismoT", &ms, 500, 10000, 500, "%.0f")) p.sismo_ms = (int)std::lround(ms);
         ImGui::PopStyleColor();
         ImGui::EndChild();
     }
@@ -824,9 +836,10 @@ void App::footerLegend() {
             ImGui::SetCursorScreenPos(ImVec2(p.x + S(20), p.y));
             ImGui::TextWrapped("%s", t);
         };
-        dotItem(hex(0xff4040), "Basınç - Pozitif Faz (Kırmızı)", true);
-        dotItem(hex(0x4090ff), "Basınç - Negatif Faz (Mavi)", true);
-        dotItem(hex(0x597ca3), "Tuz Domu (4500 m/s - Yüksek Hız)", false);
+        // Matches the wavefield colormap (positive = white, negative = dark) and the salt velocity in the solver
+        dotItem(hex(0xffffff), "Basınç - Pozitif Faz (Beyaz)", true);
+        dotItem(hex(0x4a5568), "Basınç - Negatif Faz (Koyu)", true);
+        dotItem(hex(0x597ca3), "Tuz Domu (4080 m/s - Yüksek Hız)", false);
         ImGui::TableNextColumn();
         coloredText(fonts.uiBold, hex(0x00e5a0), "Fiziksel Blending Etkisi:");
         ImGui::TextWrapped("Sismik dalgalar lineer bir denklemdir. SLO'da her iki kaynak da tek bir ortama enerji yaydığı için "

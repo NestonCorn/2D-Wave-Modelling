@@ -73,7 +73,8 @@ void GlowCircle(ImDrawList* dl, ImVec2 c, float r, ImU32 color, float glow);
 
 // ── Scene / gathers ──────────────────────────────────────────────────────
 // k = screen pixels per canvas unit (canvas units = domain metres, W x H_main)
-void drawScene(Simulation& sim, ImDrawList* dl, ImVec2 origin, float k, int overlayState);
+// ky = vertical scale (>= k when a wide, shallow domain is stretched to a usable height)
+void drawScene(Simulation& sim, ImDrawList* dl, ImVec2 origin, float k, float ky, int overlayState);
 
 struct GatherView {
     float zoomX = 1, zoomY = 1, panX = 0, panY = 0;

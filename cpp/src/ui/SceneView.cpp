@@ -10,11 +10,15 @@ namespace ui {
 
 namespace {
 
+// k = horizontal scale, ky = vertical scale (ky > k when a wide, shallow domain is
+// stretched to a minimum display height). Sizes and icon shapes use k; Q() places an
+// undistorted offset (in canvas units at scale k) from a mapped anchor point.
 struct Canvas {
     ImDrawList* dl;
     ImVec2 o;
-    float k;
-    ImVec2 P(float x, float y) const { return ImVec2(o.x + x * k, o.y + y * k); }
+    float k, ky;
+    ImVec2 P(float x, float y) const { return ImVec2(o.x + x * k, o.y + y * ky); }
+    ImVec2 Q(ImVec2 a, float dx, float dy) const { return ImVec2(a.x + dx * k, a.y + dy * k); }
 };
 
 ImU32 lerpCol(ImU32 a, ImU32 b, float t) {
@@ -60,7 +64,7 @@ void strokeCurve(const Canvas& c, const std::vector<Pt>& pts, ImU32 color, float
 }
 
 void drawSourceIcon(const Canvas& c, float x, float y, ImU32 color, float rX) {
-    ImVec2 ctr = c.P(x, y + 2 * rX);
+    ImVec2 ctr = c.Q(c.P(x, y), 0, 2 * rX);
     GlowCircle(c.dl, ctr, 3 * rX * c.k, color, 10 * rX * c.k * 0.6f);
     c.dl->AddCircle(ctr, 6 * rX * c.k, color, 24, std::max(1.0f, 1 * rX * c.k));
     c.dl->AddCircle(ctr, 10 * rX * c.k, color, 32, std::max(1.0f, 1 * rX * c.k));
@@ -70,28 +74,36 @@ void drawShip(const Canvas& c, const Simulation& sim, float x, float y, ImU32 c1
     const float W = sim.p.domain_W;
     const float rX = (W / 1200.0f) * 0.75f;
     const float W_S = 70 * rX, H_S = 20 * rX;
-    const float bx = x - W_S / 2, by = y - H_S;
+    const float bx = -W_S / 2, by = -H_S;   // offsets from the anchor (ship position on the water line)
     ImDrawList* dl = c.dl;
+    const ImVec2 a = c.P(x, y);
+    auto Q = [&](float dx, float dy) { return c.Q(a, dx, dy); };
 
     // Neon glow: a few translucent, slightly larger hulls
     ImVec4 g = vec(c2);
     for (int k = 3; k >= 1; k--) {
         float e = k * 3 * rX;
         ImU32 gc = ImGui::ColorConvertFloat4ToU32(ImVec4(g.x, g.y, g.z, 0.07f));
-        dl->AddQuadFilled(c.P(bx + 6 * rX - e, by - e), c.P(bx + W_S - 4 * rX + e, by - e),
-                          c.P(bx + W_S + 6 * rX + e, by + H_S - 2 * rX + e), c.P(bx - e, by + H_S - 2 * rX + e), gc);
+        dl->AddQuadFilled(Q(bx + 6 * rX - e, by - e), Q(bx + W_S - 4 * rX + e, by - e),
+                          Q(bx + W_S + 6 * rX + e, by + H_S - 2 * rX + e), Q(bx - e, by + H_S - 2 * rX + e), gc);
     }
-    dl->AddQuadFilled(c.P(bx + 6 * rX, by), c.P(bx + W_S - 4 * rX, by), c.P(bx + W_S + 6 * rX, by + H_S - 2 * rX),
-                      c.P(bx, by + H_S - 2 * rX), c1);
-    dl->AddRectFilled(c.P(bx + W_S * 0.55f, by - 8 * rX), c.P(bx + W_S * 0.55f + 16 * rX, by), c2);
-    dl->AddRectFilled(c.P(bx + 6 * rX, by - 4 * rX), c.P(bx + 10 * rX, by + 2 * rX), c2);   // tow mast
+    dl->AddQuadFilled(Q(bx + 6 * rX, by), Q(bx + W_S - 4 * rX, by), Q(bx + W_S + 6 * rX, by + H_S - 2 * rX),
+                      Q(bx, by + H_S - 2 * rX), c1);
+    dl->AddRectFilled(Q(bx + W_S * 0.55f, by - 8 * rX), Q(bx + W_S * 0.55f + 16 * rX, by), c2);
+    dl->AddRectFilled(Q(bx + 6 * rX, by - 4 * rX), Q(bx + 10 * rX, by + 2 * rX), c2);   // tow mast
 
     char buf[96];
     std::snprintf(buf, sizeof(buf), "%.1f Knot | %.2fm Atis", sim.p.ship_speed_knots, sim.p.shot_interval);
     float fs = std::max(6.0f, std::round(10.5f * rX)) * c.k;
-    TextAt(dl, fonts.canvasBold, fs, c.P(bx + W_S / 2, by - 26 * rX), hex(0xff8c42), buf, 1);
     float ls = std::max(6.0f, std::round(10.0f * rX)) * c.k;
-    TextAt(dl, fonts.uiBold, ls, c.P(x, by - 12 * rX), hex(0xe8f4fd), label, 1);
+    // Keep both labels inside the canvas when the sky band above the water is short
+    const float top = c.o.y + fs + S(2);
+    ImVec2 lp = Q(bx + W_S / 2, by - 26 * rX);
+    lp.y = std::max(lp.y, top);
+    TextAt(dl, fonts.canvasBold, fs, lp, hex(0xff8c42), buf, 1);
+    ImVec2 np = Q(0, by - 12 * rX);
+    np.y = std::max(np.y, lp.y + ls + S(1));
+    TextAt(dl, fonts.uiBold, ls, np, hex(0xe8f4fd), label, 1);
 }
 
 void drawCable(const Canvas& c, const Simulation& sim, float toPX) {
@@ -139,22 +151,23 @@ void drawCable(const Canvas& c, const Simulation& sim, float toPX) {
 
 void drawOBS(const Canvas& c, float x, float y, float rX) {
     const ImU32 gold = hex(0xfbbf24);
+    const ImVec2 a = c.P(x, y);
     for (int k = 2; k >= 1; k--) {
         float e = k * 2.5f * rX;
-        c.dl->AddTriangleFilled(c.P(x, y - e), c.P(x - 5 * rX - e, y + 8 * rX + e * 0.5f),
-                                c.P(x + 5 * rX + e, y + 8 * rX + e * 0.5f), rgba(251, 191, 36, 0.12f));
+        c.dl->AddTriangleFilled(c.Q(a, 0, -e), c.Q(a, -5 * rX - e, 8 * rX + e * 0.5f),
+                                c.Q(a, 5 * rX + e, 8 * rX + e * 0.5f), rgba(251, 191, 36, 0.12f));
     }
-    c.dl->AddTriangleFilled(c.P(x, y), c.P(x - 5 * rX, y + 8 * rX), c.P(x + 5 * rX, y + 8 * rX), gold);
+    c.dl->AddTriangleFilled(a, c.Q(a, -5 * rX, 8 * rX), c.Q(a, 5 * rX, 8 * rX), gold);
 }
 
 } // namespace
 
-void drawScene(Simulation& sim, ImDrawList* dl, ImVec2 o, float k, int overlay) {
+void drawScene(Simulation& sim, ImDrawList* dl, ImVec2 o, float k, float ky, int overlay) {
     const SimParams& p = sim.p;
     const float W = p.domain_W, H = p.domain_H;
     const float rX = W / 1200.0f;
     const float OY = (float)sim.OCEAN_Y;
-    Canvas c{dl, o, k};
+    Canvas c{dl, o, k, ky};
     dl->PushClipRect(c.P(0, 0), c.P(W, H), true);
 
     // Sky → water
@@ -198,21 +211,23 @@ void drawScene(Simulation& sim, ImDrawList* dl, ImVec2 o, float k, int overlay) 
     // Overlay text (eye toggle: 0 = all, 1 = none, 2 = time only)
     char buf[128];
     if (overlay == 0 || overlay == 2) {
-        const float xr = W - 16 * rX;
+        // Rows are spaced in screen units (k), right-aligned left of the eye toggle button
+        const ImVec2 hud(c.P(W, 0).x - 16 * rX * k - S(46), o.y);
+        auto R = [&](float y) { return ImVec2(hud.x, hud.y + y * rX * k); };
         if (overlay == 0) {
             std::snprintf(buf, sizeof(buf), "Staggered Grid: %d x %d | \xCE\x94h = %gm", sim.W_sim, sim.H_sim, sim.SCALE);
-            TextAt(dl, fonts.canvas, std::round(12 * rX) * k, c.P(xr, 26 * rX), rgba(255, 255, 255, 0.85f), buf, 2);
+            TextAt(dl, fonts.canvas, std::round(12 * rX) * k, R(26), rgba(255, 255, 255, 0.85f), buf, 2);
             std::snprintf(buf, sizeof(buf), "Toplam Hücre: %lld", (long long)sim.W_sim * sim.H_sim);
-            TextAt(dl, fonts.canvas, std::round(12 * rX) * k, c.P(xr, 44 * rX), rgba(255, 255, 255, 0.85f), buf, 2);
+            TextAt(dl, fonts.canvas, std::round(12 * rX) * k, R(44), rgba(255, 255, 255, 0.85f), buf, 2);
         }
         double t_ms = sim.cycle_t * sim.dtPhy() * 1000.0;
         std::snprintf(buf, sizeof(buf), "T: %.1f ms", t_ms);
-        TextAt(dl, fonts.canvasBold, std::round(16 * rX) * k, c.P(xr, (overlay == 2 ? 26 : 68) * rX), hex(0x00e5a0), buf, 2);
+        TextAt(dl, fonts.canvasBold, std::round(16 * rX) * k, R(overlay == 2 ? 26.0f : 68.0f), hex(0x00e5a0), buf, 2);
         if (overlay == 0) {
             std::snprintf(buf, sizeof(buf), "ANA GEMI ATIS: %d", sim.shotsMain);
-            TextAt(dl, fonts.canvas, std::round(11 * rX) * k, c.P(xr, 88 * rX), hex(0x1e90ff), buf, 2);
+            TextAt(dl, fonts.canvas, std::round(11 * rX) * k, R(88), hex(0x1e90ff), buf, 2);
             std::snprintf(buf, sizeof(buf), "KAYNAK ATIS: %d", sim.shotsSrc);
-            TextAt(dl, fonts.canvas, std::round(11 * rX) * k, c.P(xr, 104 * rX), hex(0xff4d6d), buf, 2);
+            TextAt(dl, fonts.canvas, std::round(11 * rX) * k, R(104), hex(0xff4d6d), buf, 2);
         }
     }
 
