@@ -272,7 +272,9 @@ void handleInput(GatherView& gv, ImVec2 o, float k) {
             float z = 1.0f - dy * 0.005f;
             if (z > 0.05f) { gv.panY = gv.startMy - (gv.startMy - gv.panY) * z; gv.zoomY *= z; }
         }
-    } else {
+    } else if (ImGui::IsItemDeactivated()) {
+        // Only the panel being released clears the drag: both panels share one GatherView,
+        // and clearing on "not active" let the idle panel cancel every drag after one frame.
         gv.dragTarget = 0;
     }
     if (hovered && io.MouseWheel != 0 && (my <= MARGIN_TOP || mx <= MARGIN_LEFT)) {
