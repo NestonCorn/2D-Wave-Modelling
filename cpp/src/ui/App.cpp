@@ -781,7 +781,7 @@ void App::gatherSection() {
         ImGui::SameLine();
         if (ImGui::RadioButton("Variable Density", &vd, 1)) gv_.vd = true;
         ImGui::SameLine(0, S(20));
-        ImGui::Checkbox("Kübik İnterpolasyon (VD)", &gv_.smooth);
+        ImGui::Checkbox("Kübik İnterpolasyon", &gv_.smooth);
         ImGui::SameLine(0, S(20));
         if (StyledButton("🔍 Pan/Zoom Sıfırla", hex(0x232b3b), hex(0x3d4a60), IM_COL32_WHITE)) gv_.reset();
     }

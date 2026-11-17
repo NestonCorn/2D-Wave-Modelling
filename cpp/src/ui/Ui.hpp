@@ -79,7 +79,7 @@ struct GatherView {
     float zoomX = 1, zoomY = 1, panX = 0, panY = 0;
     int dragTarget = 0;          // 0 none, 1 plot, 2 x-axis, 3 y-axis
     float startMx = 0, startMy = 0;
-    bool vd = true, smooth = true;   // smooth = bicubic (Catmull-Rom) VD resampling
+    bool vd = true, smooth = true;   // smooth = cubic (Catmull-Rom): VD resampling, wiggle curves
     unsigned vdTex[3] = {0, 0, 0};
     int vdW[3] = {0, 0, 0}, vdH[3] = {0, 0, 0};
     std::vector<uint32_t> vdBuf;

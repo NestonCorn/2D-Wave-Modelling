@@ -182,6 +182,15 @@ void renderTraces(const Panel& pn, Simulation& sim, GatherView& gv, int slot, si
     const float yScale = DRAW_H * gv.zoomY / GH;
     const float y0 = MARGIN_TOP + gv.panY;
 
+    // Cubic interpolation: when the samples are more than about 1.5 screen pixels apart, every
+    // interval is drawn with `sub` points on the cubic curve through the samples.
+    const int sub = gv.smooth ? std::clamp((int)std::ceil(yScale * pn.k / 1.5f), 1, 32) : 1;
+    const float qScale = yScale / sub;
+    // Only the points inside the visible time range (one sample of margin on both sides).
+    const int qBeg = std::clamp(((int)std::floor((MARGIN_TOP - y0) / yScale) - 1) * sub, 0, max_y * sub);
+    const int qEnd = std::clamp(((int)std::ceil((GH - y0) / yScale) + 1) * sub, 0, max_y * sub);
+    if (qEnd <= qBeg) return;
+
     const ImDrawListFlags oldFlags = dl->Flags;
     dl->Flags &= ~ImDrawListFlags_AntiAliasedFill;   // thousands of tiny quads: no AA fringe
     std::vector<ImVec2> line;
@@ -193,13 +202,24 @@ void renderTraces(const Panel& pn, Simulation& sim, GatherView& gv, int slot, si
         const float gx = baseX + gv.panX + i * trSpacing;
         if (gx < MARGIN_LEFT - maxDx || gx > GW - 20 + maxDx) continue;
         const float* tr = data + (size_t)i * GH;
-        auto dxAt = [&](int y) { return std::clamp(tr[y] * gain * 2.5f, -maxDx, maxDx); };
+        // Point q of the trace: sample q / sub, cubic (Catmull-Rom) between the recorded samples.
+        // Samples after max_y are not recorded yet, so the last one is repeated there.
+        auto dxAt = [&](int q) {
+            const int y = q / sub, f = q % sub;
+            float v = tr[y];
+            if (f) {
+                const float t = f / (float)sub;
+                const float a = tr[std::max(y - 1, 0)], b = tr[y], c = tr[std::min(y + 1, max_y)], d = tr[std::min(y + 2, max_y)];
+                v = cubicW(t + 1) * a + cubicW(t) * b + cubicW(1 - t) * c + cubicW(2 - t) * d;
+            }
+            return std::clamp(v * gain * 2.5f, -maxDx, maxDx);
+        };
 
         if (eff >= 1.5f) {
             // Area between the trace and its baseline (canvas nonzero fill of the trace path)
-            float pdx = dxAt(0), py = y0;
-            for (int y = 1; y <= max_y; y++) {
-                float dx = dxAt(y), yy = y0 + y * yScale;
+            float pdx = dxAt(qBeg), py = y0 + qBeg * qScale;
+            for (int y = qBeg + 1; y <= qEnd; y++) {
+                float dx = dxAt(y), yy = y0 + y * qScale;
                 if (pdx == 0 && dx == 0) { pdx = dx; py = yy; continue; }
                 if ((pdx >= 0) == (dx >= 0)) {
                     dl->AddQuadFilled(pn.P(gx, py), pn.P(gx + pdx, py), pn.P(gx + dx, yy), pn.P(gx, yy), color);
@@ -214,16 +234,16 @@ void renderTraces(const Panel& pn, Simulation& sim, GatherView& gv, int slot, si
 
         // Outline with point decimation (same criteria as the HTML)
         line.clear();
-        line.push_back(pn.P(gx, y0));
+        if (qBeg == 0) line.push_back(pn.P(gx, y0));
         float lastDx = 0, lastY = -999;
-        for (int y = 0; y <= max_y; y++) {
-            float dx = dxAt(y), yy = y0 + y * yScale;
-            if (y == 0 || y == max_y || std::fabs(yy - lastY) >= 1.0f || std::fabs(dx - lastDx) > 0.5f) {
+        for (int y = qBeg; y <= qEnd; y++) {
+            float dx = dxAt(y), yy = y0 + y * qScale;
+            if (y == qBeg || y == qEnd || std::fabs(yy - lastY) >= 1.0f || std::fabs(dx - lastDx) > 0.5f) {
                 line.push_back(pn.P(gx + dx, yy));
                 lastDx = dx; lastY = yy;
             }
         }
-        dl->AddPolyline(line.data(), (int)line.size(), strokeCol, 0, std::max(strokeW, 0.5f));
+        if (line.size() > 1) dl->AddPolyline(line.data(), (int)line.size(), strokeCol, 0, std::max(strokeW, 0.5f));
     }
     dl->Flags = oldFlags;
 }
