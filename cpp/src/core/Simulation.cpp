@@ -325,7 +325,7 @@ void Simulation::onTimeStep() {
     updateCpml();
     cpu_.setCpml(bx_, ax_, bz_, az_);
     cpu_.clearPsi();   // respawned workers start with fresh CPML memory
-    if (gpuReady) gpu_.setCpml(bx_, ax_, bz_, az_);
+    if (gpuReady) { gpu_.setCpml(bx_, ax_, bz_, az_); gpu_.clearPsi(); }   // the GPU kept stale psi before
 }
 
 void Simulation::onNpml() {
@@ -544,7 +544,9 @@ void Simulation::submitBatch(int steps) {
 
     // Region coloured on screen (drawFDTDToScreen)
     const bool active = p.expanding_box && !shots.empty();
-    int drawMin = sjSurf(), drawMax = H_sim - 1;
+    // With the free surface off the sea surface is transparent and the field above it is drawn
+    // (the CPU path already did this when the expanding box was on; the GPU never did).
+    int drawMin = p.free_surface ? sjSurf() : 0, drawMax = H_sim - 1;
     if (active) {
         drawMin = p.free_surface ? std::max(drawMin, batchBox_.min_j) : std::max(0, batchBox_.min_j);
         drawMax = std::min(H_sim - 1, batchBox_.max_j);

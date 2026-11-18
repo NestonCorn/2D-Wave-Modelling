@@ -44,7 +44,7 @@ public:
     void readP(std::vector<float>& out);   // tests only (blocking)
 
 private:
-    struct Programs { unsigned vel = 0, pres = 0, surf = 0, src = 0, sismo = 0, pix = 0; int locStep[5]{}; };
+    struct Programs { unsigned vel = 0, pres = 0, src = 0, sismo = 0, pix = 0; int locStep[5]{}; };
     unsigned makeProgram(int order, const char* body, std::string& err);
     void finishReadback();
 

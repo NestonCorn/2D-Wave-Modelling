@@ -89,11 +89,16 @@ static BatchJob makeJob(const Setup& s, const std::vector<StepData>& st, int ord
 }
 
 static void testParity(bool haveGpu) {
-    std::printf("[parity] CPU vs GPU, 1200x480 m @ 4 m, 500 steps per FD order\n");
+    std::printf("[parity] CPU vs GPU, 1200x480 m, 500 steps\n");
     if (!haveGpu) { std::printf("  SKIP: no OpenGL 4.3 context\n"); return; }
-    Setup s = makeSetup(1200, 480, 4.0);
-    const size_t sismoSize = (size_t)(s.nRec * 2 + s.nObs) * 550;
-    for (int order : {2, 4, 6, 8, 10}) {
+    struct Case { int order; bool fs; double scale; };
+    const Case cases[] = {{2, true, 4}, {4, true, 4}, {6, true, 4}, {8, true, 4}, {10, true, 4},
+                          {10, false, 4}, {4, false, 4}, {10, false, 1}};   // free surface off: top CPML
+    for (const Case& cs : cases) {
+        const int order = cs.order;
+        Setup s = makeSetup(1200, 480, cs.scale);
+        if (!cs.fs) cpmlZ(s.H, 40, s.dt, s.oceanY, s.SCALE, false, s.bz, s.az);
+        const size_t sismoSize = (size_t)(s.nRec * 2 + s.nObs) * 550;
         CpuSolver cpu;
         cpu.init(s.W, s.H, 4, sismoSize);
         cpu.setVsq(s.vsq);
@@ -106,9 +111,11 @@ static void testParity(bool haveGpu) {
         gpu.setVsq(s.vsq);
         gpu.setCpml(s.bx, s.ax, s.bz, s.az);
         gpu.setObs(s.obsX, s.obsY);
+        const int perBatch = cs.scale < 2 ? 400 : 100;   // same physical time at 1 m
         for (int b = 0; b < 5; b++) {
-            auto st = makeSteps(s, b * 100, 100, 3000);
+            auto st = makeSteps(s, b * perBatch, perBatch, 3000 * 4 / cs.scale);
             BatchJob J = makeJob(s, st, order);
+            J.freeSurface = cs.fs;
             cpu.submit(J);
             gpu.submit(J, 0);
             cpu.wait();
@@ -128,10 +135,11 @@ static void testParity(bool haveGpu) {
             sDiff = std::max(sDiff, (double)std::fabs(cpu.sismo()[i] - gpu.sismo()[i]));
         }
         const double rel = maxAbs > 0 ? maxDiff / maxAbs : 1, srel = sMax > 0 ? sDiff / sMax : 1;
-        std::printf("  O%-2d  max|P|=%.4g  P rel diff=%.2e  sismo max=%.4g rel diff=%.2e\n", order, maxAbs, rel, sMax, srel);
+        std::printf("  O%-2d fs=%d dh=%g  max|P|=%.4g  P rel diff=%.2e  sismo max=%.4g rel diff=%.2e\n", order, cs.fs, cs.scale,
+                    maxAbs, rel, sMax, srel);
         CHECK(maxAbs > 1e-6 && std::isfinite(maxAbs), "wavefield empty or non-finite (O%d)", order);
-        CHECK(rel < 1e-4, "P mismatch O%d (%.2e)", order, rel);
-        CHECK(srel < 1e-4, "sismo mismatch O%d (%.2e)", order, srel);
+        CHECK(rel < 1e-4, "P mismatch O%d fs=%d (%.2e)", order, cs.fs, rel);
+        CHECK(srel < 1e-4, "sismo mismatch O%d fs=%d (%.2e)", order, cs.fs, srel);
         gpu.destroy();
     }
 }
@@ -271,6 +279,13 @@ static void testWavelets() {
             CHECK(std::fabs(area * f) < 1e-3, "%s f=%g: non-zero area %.2e", name, f, area * f);
             CHECK(std::fabs(fBest - f) <= 0.05 * f, "%s f=%g: spectral peak at %.1f Hz", name, f, fBest);
             CHECK(e95 < 3.0 * f, "%s f=%g: too broadband (95%% energy below %.0f Hz)", name, f, e95);
+            // Shape: the minimum-phase pulse is front-loaded, the Ricker is centred at 1.5/f
+            double eAll = 0, eHalf = 0;
+            for (size_t k = 0; k < v.size(); k++) { eAll += v[k] * v[k]; if (k * dt < 0.5 / f) eHalf += v[k] * v[k]; }
+            const double frac = eHalf / eAll;
+            std::printf("           energy in the first half period: %.0f%%\n", 100 * frac);
+            if (w == Wavelet::MinPhase) CHECK(frac > 0.2, "minphase f=%g: not front-loaded (%.0f%% in 0.5/f)", f, 100 * frac);
+            else CHECK(frac < 0.01, "ricker f=%g: energy before 0.5/f (%.0f%%)", f, 100 * frac);
         }
 }
 
@@ -432,7 +447,8 @@ static void snapshots(const std::string& dir, bool haveGpu) {
 
 // --simsnap DIR MODE: run the full controller (CPU) with the expanding box on and off and
 // dump P at a few simulated times, plus the box-on vs box-off difference.
-static void simSnapshots(const std::string& dir, int modeIdx, bool minPhase) {
+static void simSnapshots(const std::string& dir, int modeIdx, bool minPhase, bool freeSurface = true, float dh = 4.0f,
+                         std::vector<double> times = {100.0, 200.0, 350.0, 600.0}) {
     const Mode m = modeIdx == 0 ? Mode::CLO : modeIdx == 1 ? Mode::SLO : Mode::Trad;
     std::vector<std::vector<float>> runs[2];
     int W = 0, H = 0;
@@ -440,15 +456,29 @@ static void simSnapshots(const std::string& dir, int modeIdx, bool minPhase) {
         Simulation sim;
         sim.p.expanding_box = box == 1;
         if (minPhase) sim.p.wavelet = Wavelet::MinPhase;
+        sim.p.free_surface = freeSurface;
+        sim.p.dh = dh;
         sim.init(false);
         W = sim.W_sim; H = sim.H_sim;
         sim.startMode(m);
         double now = 0;
-        for (double tms : {100.0, 200.0, 350.0, 600.0}) {
+        for (double tms : times) {
             while (sim.cycle_t * sim.dtPhy() * 1000.0 < tms) { now += 1.0 / 60; sim.update(now, 1.0 / 60); }
             sim.cpuSolver().wait();
             runs[box].push_back(sim.cpuSolver().P());
-            writePgm(dir + "/sim_m" + std::to_string(modeIdx) + (minPhase ? "mp" : "") + (box ? "_box_" : "_full_") + std::to_string((int)tms) + ".pgm",
+            {   // displayed RGBA texture (CPU colormap pass)
+                const std::string raw = dir + "/pix_m" + std::to_string(modeIdx) + (minPhase ? "mp" : "") + (freeSurface ? "" : "_fs0") +
+                                        (box ? "_box_" : "_full_") + std::to_string((int)tms) + ".rgba";
+                FILE* rf = std::fopen(raw.c_str(), "wb");
+                if (rf) { std::fwrite(sim.cpuSolver().pixels().data(), 4, sim.cpuSolver().pixels().size(), rf); std::fclose(rf); }
+            }
+            {   // raw float32 copy for analysis
+                const std::string raw = dir + "/sim_m" + std::to_string(modeIdx) + (minPhase ? "mp" : "") + (freeSurface ? "" : "_fs0") +
+                                        (box ? "_box_" : "_full_") + std::to_string((int)tms) + ".f32";
+                FILE* rf = std::fopen(raw.c_str(), "wb");
+                if (rf) { std::fwrite(sim.cpuSolver().P().data(), 4, sim.cpuSolver().P().size(), rf); std::fclose(rf); }
+            }
+            writePgm(dir + "/sim_m" + std::to_string(modeIdx) + (minPhase ? "mp" : "") + (freeSurface ? "" : "_fs0") + (box ? "_box_" : "_full_") + std::to_string((int)tms) + ".pgm",
                      sim.cpuSolver().P(), W, H, 20.0f);
             std::printf("box=%d t=%.1f ms (target %.0f) ship=%.1f\n", box, sim.cycle_t * sim.dtPhy() * 1000.0, tms, sim.sxShip);
         }
@@ -512,7 +542,7 @@ static double radiatedPulse(Wavelet w, const char* dumpPath = nullptr, double* p
     pulse.build(w, f);
     const std::vector<double> tp = targetPulse(w, 3 * kPulseRate);
     const int sj = s.H / 2, si = s.W / 2, n = 1500;
-    std::vector<double> inj(n), tgt(n), rec(n);
+    std::vector<double> inj(n), tgt(n), rec(n), near(n);
     for (int k = 0; k < n; k++) {
         auto st = makeSteps(s, k, 1, 1e9);
         const double t = (k + 1) * dtp;
@@ -525,10 +555,11 @@ static double radiatedPulse(Wavelet w, const char* dumpPath = nullptr, double* p
         J.freeSurface = false;
         cpu.submit(J); cpu.wait();
         rec[k] = cpu.P()[(size_t)sj * s.W + si + 60];
+        near[k] = cpu.P()[(size_t)sj * s.W + si + 8];
     }
     if (dumpPath) {
         FILE* fo = std::fopen(dumpPath, "w");
-        for (int k = 0; k < n; k++) std::fprintf(fo, "%g %g %g\n", inj[k], tgt[k], rec[k]);
+        for (int k = 0; k < n; k++) std::fprintf(fo, "%g %g %g %g\n", inj[k], tgt[k], rec[k], near[k]);
         std::fclose(fo);
     }
     if (peakHz) {   // spectral peak of the received pulse
@@ -562,6 +593,37 @@ static void testRadiatedPulse() {
     }
 }
 
+// --gpusnap DIR GAIN [minphase]: run the controller on the GPU exactly like the app (Trad mode,
+// free surface off, dh = 1 m) and dump the displayed wave texture at 100/150/200 ms.
+static void gpuSnapshots(const std::string& dir, float gain, bool minPhase, bool forceCpu = false) {
+    Simulation sim;
+    sim.p.free_surface = false;
+    sim.p.dh = 1.0f;
+    sim.p.gain = gain;
+    if (minPhase) sim.p.wavelet = Wavelet::MinPhase;
+    sim.userForceCPU = forceCpu;
+    sim.init(true);
+    std::printf("engine: %s\n", sim.usingGpu() ? "GPU" : "CPU");
+    sim.startMode(Mode::Trad);
+    double now = 0;
+    for (double tms : {100.0, 150.0, 200.0}) {
+        while (sim.cycle_t * sim.dtPhy() * 1000.0 < tms) { now += 1.0 / 60; sim.update(now, 1.0 / 60); }
+        while (sim.eikonalBusy()) { now += 1.0 / 60; sim.update(now, 1.0 / 60); }
+        sim.gpuSolver().wait();
+        sim.cpuSolver().wait();
+        now += 1.0 / 60; sim.p.speed_ms = 0.001f; sim.update(now, 1.0 / 60); sim.p.speed_ms = 16.7f;   // apply the finished batch (texture upload)
+        glFinish();
+        std::vector<uint8_t> px((size_t)sim.W_sim * sim.H_sim * 4);
+        glBindTexture(GL_TEXTURE_2D, sim.waveTex);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        const std::string path = dir + "/" + (forceCpu ? "cpu" : "gpu") + "_tex_" + (minPhase ? "mp_" : "rk_") + std::to_string((int)gain) + "_" + std::to_string((int)tms) + ".rgba";
+        FILE* f = std::fopen(path.c_str(), "wb");
+        if (f) { std::fwrite(px.data(), 1, px.size(), f); std::fclose(f); }
+        std::printf("t=%.1f ms  %dx%d\n", sim.cycle_t * sim.dtPhy() * 1000.0, sim.W_sim, sim.H_sim);
+    }
+}
+
 int main(int argc, char** argv) {
     const bool doBench = argc > 1 && std::string(argv[1]) == "--bench";
     bool haveGpu = false;
@@ -582,8 +644,28 @@ int main(int argc, char** argv) {
             }
         }
     }
+    if (argc > 3 && std::string(argv[1]) == "--gpusnap") {
+        bool mp = false, cpuOnly = false;
+        for (int a = 4; a < argc; a++) { if (std::string(argv[a]) == "minphase") mp = true; if (std::string(argv[a]) == "cpu") cpuOnly = true; }
+        gpuSnapshots(argv[2], (float)std::atof(argv[3]), mp, cpuOnly);
+        if (win) glfwDestroyWindow(win);
+        glfwTerminate();
+        return 0;
+    }
     if (argc > 3 && std::string(argv[1]) == "--simsnap") {
-        simSnapshots(argv[2], std::atoi(argv[3]), argc > 4 && std::string(argv[4]) == "minphase");
+        // optional: minphase|ricker, fs0 (free surface off), dh=<m>, t=<ms,ms,...>
+        bool mp = false, fs = true; float dh = 4.0f; std::vector<double> times = {100.0, 200.0, 350.0, 600.0};
+        for (int a = 4; a < argc; a++) {
+            const std::string x = argv[a];
+            if (x == "minphase") mp = true;
+            else if (x == "fs0") fs = false;
+            else if (x.rfind("dh=", 0) == 0) dh = (float)std::atof(x.c_str() + 3);
+            else if (x.rfind("t=", 0) == 0) {
+                times.clear();
+                for (const char* c = x.c_str() + 2; *c;) { times.push_back(std::atof(c)); while (*c && *c != ',') c++; if (*c) c++; }
+            }
+        }
+        simSnapshots(argv[2], std::atoi(argv[3]), mp, fs, dh, times);
         if (win) glfwDestroyWindow(win);
         glfwTerminate();
         return 0;

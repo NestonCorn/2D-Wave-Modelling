@@ -1,11 +1,24 @@
 #include "GpuSolver.hpp"
 #include <glad/glad.h>
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include "Params.hpp"
 #include "Shaders.hpp"
 
 namespace {
+// Work-group tile (overridable through FDTD_TILE=XxY for benchmarking)
+int tileDim(int which) {
+    static int tx = 0, ty = 0;
+    if (!tx) {
+        tx = 64; ty = 4;   // measured on RX 5700 XT: ~18 % faster than 16x16 on large grids
+        if (const char* e = std::getenv("FDTD_TILE")) { int a = 0, b = 0; if (std::sscanf(e, "%dx%d", &a, &b) == 2 && a > 0 && b > 0) { tx = a; ty = b; } }
+    }
+    return which ? ty : tx;
+}
+int tileX() { return tileDim(0); }
+int tileY() { return tileDim(1); }
 enum Binding { B_P = 0, B_VX, B_VZ, B_VSQ, B_PSIVX, B_PSIVZ, B_PSIPX, B_PSIPZ, B_CPML, B_SISMO, B_STEPS, B_OBS };
 
 struct ParamsUBO {   // std140, all scalars → tightly packed
@@ -47,7 +60,7 @@ bool GpuSolver::queryCapabilities(std::string& renderer, std::string& reason, lo
 void GpuSolver::destroy() {
     if (fence_) { glDeleteSync((GLsync)fence_); fence_ = nullptr; }
     for (auto& [o, p] : programs_)
-        for (unsigned prog : {p.vel, p.pres, p.surf, p.src, p.sismo, p.pix})
+        for (unsigned prog : {p.vel, p.pres, p.src, p.sismo, p.pix})
             if (prog) glDeleteProgram(prog);
     programs_.clear();
     if (buf_[0]) glDeleteBuffers(12, buf_);
@@ -66,16 +79,23 @@ bool GpuSolver::init(int W, int H, int nRec, int nObs, std::string& err) {
     sismo_.assign(sismoSize_, 0.0f);
 
     glGenBuffers(12, buf_);
-    auto alloc = [&](int b, size_t bytes) {
+    // Immutable, GPU-only storage for the big field buffers. With glBufferData(GL_DYNAMIC_DRAW)
+    // the AMD driver placed them in system memory once they outgrew the caches, and every step
+    // streamed the whole wavefield over PCIe (~14 GB/s, i.e. ~200 Mcells/s on any grid size).
+    // Only the small per-batch buffers keep CPU-update rights (GL_DYNAMIC_STORAGE_BIT);
+    // the velocity model goes up through a staging copy (setVsq).
+    auto alloc = [&](int b, size_t bytes, bool cpuWritable) {
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, buf_[b]);
-        glBufferData(GL_SHADER_STORAGE_BUFFER, std::max<size_t>(bytes, 16), nullptr, GL_DYNAMIC_DRAW);
+        bytes = std::max<size_t>(bytes, 16);
+        if (glBufferStorage) glBufferStorage(GL_SHADER_STORAGE_BUFFER, bytes, nullptr, cpuWritable ? GL_DYNAMIC_STORAGE_BIT : 0);
+        else glBufferData(GL_SHADER_STORAGE_BUFFER, bytes, nullptr, cpuWritable ? GL_DYNAMIC_DRAW : GL_STATIC_DRAW);
         glClearBufferData(GL_SHADER_STORAGE_BUFFER, GL_R32F, GL_RED, GL_FLOAT, nullptr);
     };
-    for (int b : {B_P, B_VX, B_VZ, B_VSQ, B_PSIVX, B_PSIVZ, B_PSIPX, B_PSIPZ}) alloc(b, N * 4);
-    alloc(B_CPML, (size_t)(2 * W + 2 * H) * 4);
-    alloc(B_SISMO, sismoSize_ * 4);
-    alloc(B_STEPS, (size_t)MAX_STEPS * sizeof(StepData));
-    alloc(B_OBS, (size_t)std::max(1, nObs) * 8);
+    for (int b : {B_P, B_VX, B_VZ, B_VSQ, B_PSIVX, B_PSIVZ, B_PSIPX, B_PSIPZ}) alloc(b, N * 4, false);
+    alloc(B_CPML, (size_t)(2 * W + 2 * H) * 4, true);
+    alloc(B_SISMO, sismoSize_ * 4, false);
+    alloc(B_STEPS, (size_t)MAX_STEPS * sizeof(StepData), true);
+    alloc(B_OBS, (size_t)std::max(1, nObs) * 8, true);
 
     glGenBuffers(1, &ubo_);
     glBindBuffer(GL_UNIFORM_BUFFER, ubo_);
@@ -95,7 +115,8 @@ bool GpuSolver::init(int W, int H, int nRec, int nObs, std::string& err) {
 }
 
 unsigned GpuSolver::makeProgram(int order, const char* body, std::string& err) {
-    std::string src = "#version 430\n#define FD_ORDER " + std::to_string(order) + "\n" + shaders::kHeader + body;
+    std::string src = "#version 430\n#define FD_ORDER " + std::to_string(order) + "\n#define TILE_X " + std::to_string(tileX()) +
+                      "\n#define TILE_Y " + std::to_string(tileY()) + "\n" + shaders::kHeader + body;
     const char* s = src.c_str();
     GLuint sh = glCreateShader(GL_COMPUTE_SHADER);
     glShaderSource(sh, 1, &s, nullptr);
@@ -127,24 +148,29 @@ bool GpuSolver::ensurePrograms(int order, std::string& err) {
     Programs p;
     p.vel = makeProgram(order, shaders::kVelocity, err);
     p.pres = p.vel ? makeProgram(order, shaders::kPressure, err) : 0;
-    p.surf = p.pres ? makeProgram(order, shaders::kFreeSurface, err) : 0;
-    p.src = p.surf ? makeProgram(order, shaders::kSource, err) : 0;
+    p.src = p.pres ? makeProgram(order, shaders::kSource, err) : 0;
     p.sismo = p.src ? makeProgram(order, shaders::kSismo, err) : 0;
     p.pix = p.sismo ? makeProgram(order, shaders::kPixels, err) : 0;
     if (!p.pix) {
-        for (unsigned prog : {p.vel, p.pres, p.surf, p.src, p.sismo}) if (prog) glDeleteProgram(prog);
+        for (unsigned prog : {p.vel, p.pres, p.src, p.sismo}) if (prog) glDeleteProgram(prog);
         return false;
     }
-    unsigned progs[5] = {p.vel, p.pres, p.surf, p.src, p.sismo};
-    for (int k = 0; k < 5; k++) p.locStep[k] = glGetUniformLocation(progs[k], "uStep");
+    unsigned progs[5] = {p.vel, p.pres, 0, p.src, p.sismo};
+    for (int k = 0; k < 5; k++) p.locStep[k] = progs[k] ? glGetUniformLocation(progs[k], "uStep") : -1;
     programs_[order] = p;
     return true;
 }
 
 void GpuSolver::setVsq(const std::vector<float>& vsq) {
     wait();
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, buf_[B_VSQ]);
-    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, vsq.size() * 4, vsq.data());
+    // The model buffer is GPU-only: upload through a temporary staging buffer
+    GLuint staging = 0;
+    glGenBuffers(1, &staging);
+    glBindBuffer(GL_COPY_READ_BUFFER, staging);
+    glBufferData(GL_COPY_READ_BUFFER, vsq.size() * 4, vsq.data(), GL_STREAM_COPY);
+    glBindBuffer(GL_COPY_WRITE_BUFFER, buf_[B_VSQ]);
+    glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0, vsq.size() * 4);
+    glDeleteBuffers(1, &staging);
 }
 
 void GpuSolver::setCpml(const std::vector<float>& bx, const std::vector<float>& ax,
@@ -203,9 +229,7 @@ void GpuSolver::submit(const BatchJob& J, unsigned waveTex) {
 
     const int x0 = std::max(0, J.bxmin), y0 = std::max(0, J.bymin);
     const int boxW = std::max(0, J.bxmax - x0 + 1), boxH = std::max(0, J.bymax - y0 + 1);
-    const GLuint wx = (boxW + 15) / 16, wy = (boxH + 15) / 16;
-    const int surfH = std::max(0, std::min(J.bymax, J.sj_surf + 1) - y0);
-    const GLuint wySurf = (surfH + 15) / 16;
+    const GLuint wx = (boxW + tileX() - 1) / tileX(), wy = (boxH + tileY() - 1) / tileY();
     const GLuint wxRec = (nRec_ + nObs_ + 127) / 128;
 
     for (int s = 0; s < steps && wx > 0 && wy > 0; s++) {
@@ -214,10 +238,7 @@ void GpuSolver::submit(const BatchJob& J, unsigned waveTex) {
         glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
         glUseProgram(pr.pres); glUniform1i(pr.locStep[1], s); glDispatchCompute(wx, wy, 1);
         glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
-        if (J.freeSurface && wySurf > 0) {
-            glUseProgram(pr.surf); glUniform1i(pr.locStep[2], s); glDispatchCompute(wx, wySurf, 1);
-            glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
-        }
+        // (free surface: applied inside the pressure pass; rows < H2 are never written and stay 0)
         if (sd.act0 > 0.5f || sd.act1 > 0.5f) {
             glUseProgram(pr.src); glUniform1i(pr.locStep[3], s); glDispatchCompute(1, 1, 1);
             glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
