@@ -356,7 +356,7 @@ static void bench(bool haveGpu) {
         const int steps = c.W * c.H / (c.dh * c.dh) > 5e6 ? 40 : 400;
         auto st = makeSteps(s, 0, steps, 1e9);
         BatchJob J = makeJob(s, st, 10);
-        for (int thr : {1, 2, 4, 8}) {
+        for (int thr : {1, 2, 3, 4, 5, 6, 7, 8, 10, 12}) {
             if (std::getenv("FDTD_THREAD_SWEEP") == nullptr) break;
             CpuSolver cpu;
             cpu.init(s.W, s.H, thr, sismoSize);

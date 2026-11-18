@@ -3,7 +3,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
-#include <xmmintrin.h>
+#include <immintrin.h>
 #include "Params.hpp"
 
 namespace {
@@ -47,73 +47,182 @@ inline void rowRange(int lo, int hi, int t, int n, int& r0, int& r1) {
     r1 = lo + (int)((long long)count * (t + 1) / n);
 }
 
-// ── Phase 1: velocity update with CPML (rows [j0, j1)) ──────────────────────
-template <int ORD>
-void velocityRows(int j0, int j1, int bx0, int bx1, int W, int H, float dt,
-                  const float* __restrict P, float* __restrict Vx, float* __restrict Vz,
-                  float* __restrict psiVx, float* __restrict psiVz,
-                  const float* __restrict bx, const float* __restrict ax,
-                  const float* __restrict bz, const float* __restrict az) {
+#if defined(_MSC_VER)
+#define FDTD_INLINE __forceinline
+#else
+#define FDTD_INLINE inline __attribute__((always_inline))
+#endif
+
+// The stencil loops are written with AVX2/FMA intrinsics, 8 cells per iteration: MSVC
+// would not auto-vectorise them (it cannot prove the field arrays do not alias), so the
+// CPU used to advance one cell at a time. PX / PZ select whether the CPML memory (psi) is
+// read and written: outside the absorbing layers a = 0 and b = 1, psi stays 0, and skipping
+// its 4 loads + 4 stores per cell roughly halves the memory traffic there.
+
+// ── Phase 1: velocity update on one row segment [i0, i1) (pointers at the row start) ──
+template <int ORD, bool PX, bool PZ>
+FDTD_INLINE void velocitySeg(int i0, int i1, int W, float dt, const float* __restrict P, float* __restrict Vx,
+                             float* __restrict Vz, float* __restrict pvx, float* __restrict pvz,
+                             const float* __restrict bx, const float* __restrict ax, float bzj, float azj) {
     constexpr int H2 = ORD / 2;
     constexpr const float* c = Coef<ORD>::c;
+    int i = i0;
+    const __m256 vdt = _mm256_set1_ps(dt), vbz = _mm256_set1_ps(bzj), vaz = _mm256_set1_ps(azj);
+    for (; i + 8 <= i1; i += 8) {
+        const float* p = P + i;
+        const __m256 p0 = _mm256_loadu_ps(p);
+        const __m256 dPx = _mm256_sub_ps(_mm256_loadu_ps(p + 1), p0);
+        const __m256 dPz = _mm256_sub_ps(_mm256_loadu_ps(p + W), p0);
+        __m256 sDx = _mm256_mul_ps(_mm256_set1_ps(c[0]), dPx);
+        __m256 sDz = _mm256_mul_ps(_mm256_set1_ps(c[0]), dPz);
+        for (int k = 1; k < H2; k++) {
+            const __m256 ck = _mm256_set1_ps(c[k]);
+            sDx = _mm256_fmadd_ps(ck, _mm256_sub_ps(_mm256_loadu_ps(p + k + 1), _mm256_loadu_ps(p - k)), sDx);
+            sDz = _mm256_fmadd_ps(ck, _mm256_sub_ps(_mm256_loadu_ps(p + (k + 1) * W), _mm256_loadu_ps(p - k * W)), sDz);
+        }
+        if constexpr (PX) {
+            const __m256 px = _mm256_fmadd_ps(_mm256_loadu_ps(bx + i), _mm256_loadu_ps(pvx + i),
+                                              _mm256_mul_ps(_mm256_loadu_ps(ax + i), dPx));
+            _mm256_storeu_ps(pvx + i, px);
+            sDx = _mm256_add_ps(sDx, px);
+        }
+        if constexpr (PZ) {
+            const __m256 pz = _mm256_fmadd_ps(vbz, _mm256_loadu_ps(pvz + i), _mm256_mul_ps(vaz, dPz));
+            _mm256_storeu_ps(pvz + i, pz);
+            sDz = _mm256_add_ps(sDz, pz);
+        }
+        _mm256_storeu_ps(Vx + i, _mm256_fnmadd_ps(vdt, sDx, _mm256_loadu_ps(Vx + i)));
+        _mm256_storeu_ps(Vz + i, _mm256_fnmadd_ps(vdt, sDz, _mm256_loadu_ps(Vz + i)));
+    }
+    for (; i < i1; i++) {   // tail
+        const float* p = P + i;
+        const float dPx = p[1] - p[0], dPz = p[W] - p[0];
+        float sDx = c[0] * dPx, sDz = c[0] * dPz;
+        for (int k = 1; k < H2; k++) {
+            sDx += c[k] * (p[k + 1] - p[-k]);
+            sDz += c[k] * (p[(k + 1) * W] - p[-k * W]);
+        }
+        if constexpr (PX) { const float px = bx[i] * pvx[i] + ax[i] * dPx; pvx[i] = px; sDx += px; }
+        if constexpr (PZ) { const float pz = bzj * pvz[i] + azj * dPz; pvz[i] = pz; sDz += pz; }
+        Vx[i] -= dt * sDx;
+        Vz[i] -= dt * sDz;
+    }
+}
+
+// ── Phase 2: pressure update on one row segment ──
+template <int ORD, bool PX, bool PZ>
+FDTD_INLINE void pressureSeg(int i0, int i1, int W, float dt, float* __restrict P, const float* __restrict Vx,
+                             const float* __restrict Vz, const float* __restrict vsq, float* __restrict ppx,
+                             float* __restrict ppz, const float* __restrict bx, const float* __restrict ax, float bzj,
+                             float azj) {
+    constexpr int H2 = ORD / 2;
+    constexpr const float* c = Coef<ORD>::c;
+    int i = i0;
+    const __m256 vdt = _mm256_set1_ps(dt), vbz = _mm256_set1_ps(bzj), vaz = _mm256_set1_ps(azj);
+    for (; i + 8 <= i1; i += 8) {
+        const float* vx = Vx + i;
+        const float* vz = Vz + i;
+        const __m256 dVx1 = _mm256_sub_ps(_mm256_loadu_ps(vx), _mm256_loadu_ps(vx - 1));
+        const __m256 dVz1 = _mm256_sub_ps(_mm256_loadu_ps(vz), _mm256_loadu_ps(vz - W));
+        __m256 dVx = _mm256_mul_ps(_mm256_set1_ps(c[0]), dVx1);
+        __m256 dVz = _mm256_mul_ps(_mm256_set1_ps(c[0]), dVz1);
+        for (int k = 1; k < H2; k++) {
+            const __m256 ck = _mm256_set1_ps(c[k]);
+            dVx = _mm256_fmadd_ps(ck, _mm256_sub_ps(_mm256_loadu_ps(vx + k), _mm256_loadu_ps(vx - k - 1)), dVx);
+            dVz = _mm256_fmadd_ps(ck, _mm256_sub_ps(_mm256_loadu_ps(vz + k * W), _mm256_loadu_ps(vz - (k + 1) * W)), dVz);
+        }
+        __m256 sum = _mm256_add_ps(dVx, dVz);
+        if constexpr (PX) {
+            const __m256 px = _mm256_fmadd_ps(_mm256_loadu_ps(bx + i), _mm256_loadu_ps(ppx + i),
+                                              _mm256_mul_ps(_mm256_loadu_ps(ax + i), dVx1));
+            _mm256_storeu_ps(ppx + i, px);
+            sum = _mm256_add_ps(sum, px);
+        }
+        if constexpr (PZ) {
+            const __m256 pz = _mm256_fmadd_ps(vbz, _mm256_loadu_ps(ppz + i), _mm256_mul_ps(vaz, dVz1));
+            _mm256_storeu_ps(ppz + i, pz);
+            sum = _mm256_add_ps(sum, pz);
+        }
+        const __m256 k2 = _mm256_mul_ps(vdt, _mm256_loadu_ps(vsq + i));
+        _mm256_storeu_ps(P + i, _mm256_fnmadd_ps(k2, sum, _mm256_loadu_ps(P + i)));
+    }
+    for (; i < i1; i++) {   // tail
+        const float* vx = Vx + i;
+        const float* vz = Vz + i;
+        const float dVx1 = vx[0] - vx[-1], dVz1 = vz[0] - vz[-W];
+        float dVx = c[0] * dVx1, dVz = c[0] * dVz1;
+        for (int k = 1; k < H2; k++) {
+            dVx += c[k] * (vx[k] - vx[-k - 1]);
+            dVz += c[k] * (vz[k * W] - vz[-(k + 1) * W]);
+        }
+        float sum = dVx + dVz;
+        if constexpr (PX) { const float px = bx[i] * ppx[i] + ax[i] * dVx1; ppx[i] = px; sum += px; }
+        if constexpr (PZ) { const float pz = bzj * ppz[i] + azj * dVz1; ppz[i] = pz; sum += pz; }
+        P[i] -= dt * vsq[i] * sum;
+    }
+}
+
+// Split [is, ie] into left CPML / interior (ax == 0 on [xi0, xi1]) / right CPML segments
+template <typename F>
+FDTD_INLINE void forSegments(int is, int ie, int xi0, int xi1, F&& seg) {
+    if (ie < is) return;
+    if (xi0 > xi1) { seg(is, ie + 1, true); return; }   // no interior column at all
+    const int a = std::min(xi0, ie + 1), b0 = std::max(is, xi0), b1 = std::min(xi1, ie) + 1, c0 = std::max(is, xi1 + 1);
+    if (a > is) seg(is, a, true);
+    if (b1 > b0) seg(b0, b1, false);
+    if (ie + 1 > c0) seg(c0, ie + 1, true);
+}
+
+// ── Phase 1: velocity update with CPML (rows [j0, j1)) ──────────────────────
+template <int ORD>
+void velocityRows(int j0, int j1, int bx0, int bx1, int W, int H, float dt, int xi0, int xi1,
+                  const float* P, float* Vx, float* Vz, float* psiVx, float* psiVz,
+                  const float* bx, const float* ax, const float* bz, const float* az) {
+    constexpr int H2 = ORD / 2;
     const int js = std::max(H2 - 1, j0), je = std::min(j1, H - H2);
     const int is = std::max(H2 - 1, bx0), ie = std::min(W - H2 - 1, bx1);
     for (int j = js; j < je; j++) {
         const size_t row = (size_t)j * W;
         const float bzj = bz[j], azj = az[j];
+        const bool pz = azj != 0.0f;
         const float* Pr = P + row;
-        float* Vxr = Vx + row; float* Vzr = Vz + row;
-        float* pvx = psiVx + row; float* pvz = psiVz + row;
-        for (int i = is; i <= ie; i++) {
-            const float* p = Pr + i;
-            float dPx = p[1] - p[0];
-            float dPz = p[W] - p[0];
-            float px = bx[i] * pvx[i] + ax[i] * dPx;
-            float pz = bzj * pvz[i] + azj * dPz;
-            pvx[i] = px; pvz[i] = pz;
-            float sDx = c[0] * dPx, sDz = c[0] * dPz;
-            for (int k = 1; k < H2; k++) {
-                sDx += c[k] * (p[k + 1] - p[-k]);
-                sDz += c[k] * (p[(k + 1) * W] - p[-k * W]);
+        float *vx = Vx + row, *vz = Vz + row, *pvx = psiVx + row, *pvz = psiVz + row;
+        forSegments(is, ie, xi0, xi1, [&](int i0, int i1, bool px) {
+            if (px) {
+                if (pz) velocitySeg<ORD, true, true>(i0, i1, W, dt, Pr, vx, vz, pvx, pvz, bx, ax, bzj, azj);
+                else    velocitySeg<ORD, true, false>(i0, i1, W, dt, Pr, vx, vz, pvx, pvz, bx, ax, bzj, azj);
+            } else {
+                if (pz) velocitySeg<ORD, false, true>(i0, i1, W, dt, Pr, vx, vz, pvx, pvz, bx, ax, bzj, azj);
+                else    velocitySeg<ORD, false, false>(i0, i1, W, dt, Pr, vx, vz, pvx, pvz, bx, ax, bzj, azj);
             }
-            Vxr[i] -= dt * (sDx + px);
-            Vzr[i] -= dt * (sDz + pz);
-        }
+        });
     }
 }
 
 // ── Phase 2: pressure update with CPML (rows [j0, j1)) ──────────────────────
 template <int ORD>
-void pressureRows(int j0, int j1, int bx0, int bx1, int W, int H, float dt,
-                  float* __restrict P, const float* __restrict Vx, const float* __restrict Vz,
-                  const float* __restrict Vsq, float* __restrict psiPx, float* __restrict psiPz,
-                  const float* __restrict bx, const float* __restrict ax,
-                  const float* __restrict bz, const float* __restrict az) {
+void pressureRows(int j0, int j1, int bx0, int bx1, int W, int H, float dt, int xi0, int xi1,
+                  float* P, const float* Vx, const float* Vz, const float* Vsq, float* psiPx, float* psiPz,
+                  const float* bx, const float* ax, const float* bz, const float* az) {
     constexpr int H2 = ORD / 2;
-    constexpr const float* c = Coef<ORD>::c;
     const int js = std::max(H2, j0), je = std::min(j1, H - H2);
     const int is = std::max(H2, bx0), ie = std::min(W - H2 - 1, bx1);
     for (int j = js; j < je; j++) {
         const size_t row = (size_t)j * W;
         const float bzj = bz[j], azj = az[j];
-        float* Pr = P + row; const float* vsq = Vsq + row;
-        const float* Vxr = Vx + row; const float* Vzr = Vz + row;
-        float* ppx = psiPx + row; float* ppz = psiPz + row;
-        for (int i = is; i <= ie; i++) {
-            const float* vx = Vxr + i;
-            const float* vz = Vzr + i;
-            float dVx1 = vx[0] - vx[-1];
-            float dVz1 = vz[0] - vz[-W];
-            float px = bx[i] * ppx[i] + ax[i] * dVx1;
-            float pz = bzj * ppz[i] + azj * dVz1;
-            ppx[i] = px; ppz[i] = pz;
-            float dVx = c[0] * dVx1, dVz = c[0] * dVz1;
-            for (int k = 1; k < H2; k++) {
-                dVx += c[k] * (vx[k] - vx[-k - 1]);
-                dVz += c[k] * (vz[k * W] - vz[-(k + 1) * W]);
+        const bool pz = azj != 0.0f;
+        float* Pr = P + row;
+        const float *vx = Vx + row, *vz = Vz + row, *vs = Vsq + row;
+        float *ppx = psiPx + row, *ppz = psiPz + row;
+        forSegments(is, ie, xi0, xi1, [&](int i0, int i1, bool px) {
+            if (px) {
+                if (pz) pressureSeg<ORD, true, true>(i0, i1, W, dt, Pr, vx, vz, vs, ppx, ppz, bx, ax, bzj, azj);
+                else    pressureSeg<ORD, true, false>(i0, i1, W, dt, Pr, vx, vz, vs, ppx, ppz, bx, ax, bzj, azj);
+            } else {
+                if (pz) pressureSeg<ORD, false, true>(i0, i1, W, dt, Pr, vx, vz, vs, ppx, ppz, bx, ax, bzj, azj);
+                else    pressureSeg<ORD, false, false>(i0, i1, W, dt, Pr, vx, vz, vs, ppx, ppz, bx, ax, bzj, azj);
             }
-            Pr[i] -= dt * vsq[i] * (dVx + px + dVz + pz);
-        }
+        });
     }
 }
 
@@ -150,6 +259,7 @@ void CpuSolver::init(int W, int H, int nThreads, size_t sismoSize) {
     pixels_.assign(N, 0u);
     sismo_.assign(sismoSize, 0.0f);
     bx_.assign(W, 1.0f); ax_.assign(W, 0.0f); bz_.assign(H, 1.0f); az_.assign(H, 0.0f);
+    xi0_ = 0; xi1_ = W - 1;
     unstable_ = false;
 }
 
@@ -158,6 +268,12 @@ void CpuSolver::setVsq(const std::vector<float>& vsq) { wait(); Vsq_ = vsq; }
 void CpuSolver::setCpml(const std::vector<float>& bx, const std::vector<float>& ax,
                         const std::vector<float>& bz, const std::vector<float>& az) {
     wait(); bx_ = bx; ax_ = ax; bz_ = bz; az_ = az;
+    // Interior columns (no x-CPML): psi_x is neither read nor written there
+    xi0_ = W_; xi1_ = -1;
+    for (int i = 0; i < (int)ax_.size(); i++)
+        if (ax_[i] == 0.0f) { xi0_ = std::min(xi0_, i); xi1_ = i; }
+    for (int i = xi0_; i <= xi1_; i++)
+        if (ax_[i] != 0.0f) { xi0_ = W_; xi1_ = -1; break; }   // not one contiguous block: keep psi everywhere
 }
 void CpuSolver::setCpmlZ(const std::vector<float>& bz, const std::vector<float>& az) { wait(); bz_ = bz; az_ = az; }
 
@@ -250,13 +366,13 @@ void CpuSolver::runJob(int t) {
 
     for (int s = 0; s < J.steps; s++) {
         auto t0 = Clock::now();
-        velocityRows<ORD>(r0, r1, bx0, bx1, W, H, J.dt, P_.data(), Vx_.data(), Vz_.data(),
+        velocityRows<ORD>(r0, r1, bx0, bx1, W, H, J.dt, xi0_, xi1_, P_.data(), Vx_.data(), Vz_.data(),
                           psiVx_.data(), psiVz_.data(), bx_.data(), ax_.data(), bz_.data(), az_.data());
         auto t1 = Clock::now();
         barrier_->arrive_and_wait();
         auto t2 = Clock::now();
 
-        pressureRows<ORD>(r0, r1, bx0, bx1, W, H, J.dt, P_.data(), Vx_.data(), Vz_.data(), Vsq_.data(),
+        pressureRows<ORD>(r0, r1, bx0, bx1, W, H, J.dt, xi0_, xi1_, P_.data(), Vx_.data(), Vz_.data(), Vsq_.data(),
                           psiPx_.data(), psiPz_.data(), bx_.data(), ax_.data(), bz_.data(), az_.data());
         // Dirichlet free surface (P = 0 above and at the sea surface), distributed by rows
         for (int j = r0; j < fs1; j++) {

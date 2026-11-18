@@ -58,6 +58,7 @@ private:
     int W_ = 0, H_ = 0, nThreads_ = 0;
     std::vector<float> P_, Vx_, Vz_, Vsq_, psiVx_, psiVz_, psiPx_, psiPz_;
     std::vector<float> bx_, ax_, bz_, az_;
+    int xi0_ = 0, xi1_ = -1;   // contiguous columns with ax == 0 (no x-CPML)
     std::vector<float> sismo_;
     std::vector<uint32_t> pixels_;
 
