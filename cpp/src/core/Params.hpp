@@ -4,7 +4,7 @@
 
 enum class Mode { None, CLO, SLO, Trad };
 enum class GeologyModel { Flat = 0, Fault = 1, Salt = 2 };
-enum class Wavelet { Ricker = 0, MinPhase = 1 };
+enum class Wavelet { Ricker = 0, MinPhase = 1, Gauss = 2, GaussDeriv = 3 };
 
 // Sismogram panel size in logical pixels (GW x GH in the HTML)
 constexpr int GW = 598;

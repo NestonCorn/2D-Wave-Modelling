@@ -8,7 +8,13 @@
 //
 // targetPulse(): the waveform the wave field should carry, unit peak, sampled from the
 // shot time at dt = 1 / (kPulseRate * f).
-//   Ricker      zero-phase, symmetric, centred at 1.5/f.
+//   Ricker      zero-phase, symmetric (trough - peak - trough), centred at 1.5/f.
+//   Gauss       exp(-(pi f tau)^2), the Gaussian whose negative 2nd derivative is the Ricker of
+//               the same f; a single peak, zero phase, centred at 1.5/f. Its spectrum peaks at
+//               DC, so its area is not zero (see SourcePulse for what that means in 2D).
+//   GaussDeriv  first derivative of a Gaussian, -tau exp(-2 (pi f tau)^2): one peak then one
+//               trough, antisymmetric (90 deg phase), zero area, spectrum peaking at f,
+//               centred at 1.5/f.
 //   MinPhase    impulse response of a causal band-pass: 2nd-order critically damped high-pass
 //               at 0.66 f, 4th-order Butterworth low-pass at 1.32 f and two real poles at 2.8 f.
 //               A causal filter with all poles in the left half-plane is minimum phase by
@@ -72,7 +78,10 @@ inline std::vector<double> targetPulse(Wavelet type, int len) {
     for (int i = 0; i < len; i++) {
         const double tc = (double)i / kPulseRate - 1.5;   // in periods
         const double a = M_PI * M_PI * tc * tc;
-        w[i] = (1.0 - 2.0 * a) * std::exp(-a);
+        if (type == Wavelet::Gauss) w[i] = std::exp(-a);
+        // peak of -x exp(-2 pi^2 x^2) is at x = -1/(2 pi): (1/(2 pi)) e^(-1/2)
+        else if (type == Wavelet::GaussDeriv) w[i] = -tc * std::exp(-2.0 * a) / (std::exp(-0.5) / (2.0 * M_PI));
+        else w[i] = (1.0 - 2.0 * a) * std::exp(-a);
     }
     return w;
 }
@@ -82,6 +91,14 @@ inline std::vector<double> targetPulse(Wavelet type, int len) {
 // asymmetric (deeper trailing trough, ~45 deg phase shift). Injecting the half-integral
 // (Riemann-Liouville, Gruenwald-Letnikov weights) of the target pulse makes the propagating
 // wave carry the target pulse itself. Tabulated on a fine grid, normalised to unit peak.
+//
+// The Gaussian is the exception: its area is not zero, and the half-integral of a pulse with
+// a net area decays only like t^-1/2, so it would have to be injected for ever (cutting it
+// off starts a second, late wave at the source). Physically a localised 2D source cannot
+// radiate a pressure pulse with a net area. For it the half-integral is tempered,
+// (i omega + a)^-1/2 with a = 2 pi 0.25 f: the kernel decays like e^(-a t) and the radiated
+// pulse is the Gaussian with its lowest frequencies removed - the Gaussian peak followed by
+// a shallow negative undershoot.
 class SourcePulse {
 public:
     bool matches(Wavelet type, double f) const { return type == type_ && f == f_; }
@@ -89,14 +106,17 @@ public:
     void build(Wavelet type, double f) {
         type_ = type; f_ = f;
         dtau_ = 1.0 / (kPulseRate * f);
-        // Both targets are < 1e-4 of their peak after 3 periods; the half-integral tail of a
-        // zero-area pulse decays like t^-3/2: keep 8 periods and taper the last 2.
+        // All targets are < 1e-4 of their peak after 3 periods; the half-integral tail of a
+        // zero-area pulse decays like t^-3/2 (tempered for the Gaussian): keep 8 periods and
+        // taper the last 2.
         const int n = 8 * kPulseRate;
         std::vector<double> x = targetPulse(type, n);
         for (int i = 3 * kPulseRate; i < n; i++) x[i] = 0.0;
         std::vector<double> g(n);
         g[0] = 1.0;
         for (int k = 1; k < n; k++) g[k] = g[k - 1] * (k - 0.5) / k;
+        if (type == Wavelet::Gauss)
+            for (int k = 0; k < n; k++) g[k] *= std::exp(-2.0 * M_PI * 0.25 * k / kPulseRate);
         v_.assign(n, 0.0);
         double peak = 0;
         for (int i = 0; i < n; i++) {

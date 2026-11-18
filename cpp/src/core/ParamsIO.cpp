@@ -41,7 +41,8 @@ std::string paramsToJson(const SimParams& p, double shipX) {
     j["sl_speed"] = jsNum(std::round(p.speed_ms * 10.0) / 10.0);
     j["sismoTimeSlider"] = std::to_string(p.sismo_ms);
     j["segyLenVal"] = std::to_string(p.sismo_ms);
-    j["sl_wavelet"] = p.wavelet == Wavelet::MinPhase ? "minphase" : "ricker";   // new in the C++ port
+    j["sl_wavelet"] = p.wavelet == Wavelet::MinPhase ? "minphase" : p.wavelet == Wavelet::Gauss ? "gauss"
+                      : p.wavelet == Wavelet::GaussDeriv ? "gaussderiv" : "ricker";   // new in the C++ port
     j["obs_enabled"] = p.obs_enabled;
     return j.dump(2);
 }
@@ -108,7 +109,11 @@ bool paramsFromJson(const std::string& text, SimParams& p, double& shipX, std::s
     if (num(j, "sismoTimeSlider", v)) p.sismo_ms = (int)v;
     if (num(j, "segyLenVal", v)) p.sismo_ms = (int)v;   // later key wins, as in the browser
     if (j.contains("sl_wavelet") && j["sl_wavelet"].is_string())
-        p.wavelet = j["sl_wavelet"].get<std::string>() == "minphase" ? Wavelet::MinPhase : Wavelet::Ricker;
+    {
+        const std::string w = j["sl_wavelet"].get<std::string>();
+        p.wavelet = w == "minphase" ? Wavelet::MinPhase : w == "gauss" ? Wavelet::Gauss
+                  : w == "gaussderiv" ? Wavelet::GaussDeriv : Wavelet::Ricker;
+    }
     if (j.contains("obs_enabled") && j["obs_enabled"].is_boolean()) p.obs_enabled = j["obs_enabled"].get<bool>();
     return true;
 }

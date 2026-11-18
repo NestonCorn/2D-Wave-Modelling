@@ -112,13 +112,12 @@ void Simulation::rebuildEngines() {
     const size_t sismoSize = (size_t)(N_REC * 2 + N_OBS) * GH;
     int hc = (int)std::thread::hardware_concurrency();
     if (hc <= 0) hc = 4;
-    // With the AVX2 kernels a step is memory-bound: bandwidth saturates at ~4-5 threads on
-    // large grids, and on small grids the three barriers per step dominate (the default
-    // 301x121 grid ran ~2-3x faster on 2 threads than on 7). One thread per ~20k cells, at
-    // most half the logical cores + 1 (beyond that hybrid / SMT cores only add barrier cost).
-    const long long cells = (long long)W_sim * H_sim;
-    const int bySize = (int)std::min<long long>(64, (cells + 19999) / 20000);
-    const int nThreads = std::clamp(bySize, 1, std::max(1, std::min(hc / 2 + 1, H_sim / 16)));
+    // The CPU engine runs the pipelined (temporally blocked) scheme: each thread advances its
+    // own time step a few row bands behind the previous one. Measured on a Ryzen 5 3600 it is
+    // fastest with 6-8 threads on every grid size (no per-step barriers any more); beyond
+    // half the logical cores + 1, SMT / efficiency cores only add contention. Each thread
+    // needs a few dozen rows of its own to stay out of its neighbours' way.
+    const int nThreads = std::clamp(hc / 2 + 1, 1, std::max(1, H_sim / 16));
     cpu_.init(W_sim, H_sim, nThreads, sismoSize);
     cpu_.setVsq(vsq);
     cpu_.setCpml(bx_, ax_, bz_, az_);
@@ -686,7 +685,10 @@ bool Simulation::boxFor(double t_sec, EikBox& out) const {
         out.hasRows = false;
         return false;
     }
-    eik_.getBox(t_sec, p.fd_order, p.free_surface, sjSurf(), out);
+    // Half a period of head start: the minimum-phase pulse carries energy from the shot
+    // instant (the Ricker only from ~0.6/f), and the box edge clipped its weak numerical
+    // precursor (box on/off traces differed by 2e-5; now within float noise).
+    eik_.getBox(t_sec + 0.5 / std::max(0.1f, p.freq), p.fd_order, p.free_surface, sjSurf(), out);
     return true;
 }
 

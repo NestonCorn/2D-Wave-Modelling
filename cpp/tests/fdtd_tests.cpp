@@ -243,11 +243,19 @@ static double pulseAt(const std::vector<double>& tp, double f, double t) {
     return tp[i] + (tp[i + 1] - tp[i]) * (u - (double)i);
 }
 
-// Both wavelets: zero area (no static pressure left at the source), unit peak, spectrum
+static const Wavelet kAllWavelets[] = {Wavelet::Ricker, Wavelet::MinPhase, Wavelet::Gauss, Wavelet::GaussDeriv};
+static const char* waveletName(Wavelet w) {
+    return w == Wavelet::Ricker ? "ricker" : w == Wavelet::MinPhase ? "minphase" : w == Wavelet::Gauss ? "gauss" : "gaussder";
+}
+static Wavelet waveletFromArg(const std::string& a) {
+    return a == "minphase" ? Wavelet::MinPhase : a == "gauss" ? Wavelet::Gauss : a == "gaussder" ? Wavelet::GaussDeriv : Wavelet::Ricker;
+}
+
+// Every wavelet except the Gaussian: zero area (no static pressure left at the source), unit peak, spectrum
 // peaking at the dominant frequency, and band-limited enough for the grid.
 static void testWavelets() {
-    std::printf("[wavelet] Ricker and minimum phase: zero DC, peak at f\n");
-    for (Wavelet w : {Wavelet::Ricker, Wavelet::MinPhase})
+    std::printf("[wavelet] unit peak; zero DC and spectral peak at f (all but the Gaussian)\n");
+    for (Wavelet w : kAllWavelets)
         for (double f : {10.0, 50.0, 120.0}) {
             const double dt = 1e-5;
             std::vector<double> v;
@@ -272,21 +280,146 @@ static void testWavelets() {
             double acc = 0; int k95 = 0;
             for (; k95 < (int)spec.size() && acc < 0.95 * eTot; k95++) acc += spec[k95];
             e95 = k95 * f / 50;
-            const char* name = w == Wavelet::Ricker ? "ricker" : "minphase";
+            const char* name = waveletName(w);
+            const bool gauss = w == Wavelet::Gauss;   // single peak: spectrum peaks at DC, area != 0
             std::printf("  %-8s f=%5.1f  peak=%.3f  area*f=%.1e  spectral peak=%.1f Hz  f95=%.0f Hz\n", name, f, peak,
                         area * f, fBest, e95);
             CHECK(std::fabs(peak - 1.0) < 1e-3, "%s f=%g: peak %.4f", name, f, peak);
-            CHECK(std::fabs(area * f) < 1e-3, "%s f=%g: non-zero area %.2e", name, f, area * f);
-            CHECK(std::fabs(fBest - f) <= 0.05 * f, "%s f=%g: spectral peak at %.1f Hz", name, f, fBest);
+            if (!gauss) CHECK(std::fabs(area * f) < 1e-3, "%s f=%g: non-zero area %.2e", name, f, area * f);
+            if (!gauss) CHECK(std::fabs(fBest - f) <= 0.05 * f, "%s f=%g: spectral peak at %.1f Hz", name, f, fBest);
             CHECK(e95 < 3.0 * f, "%s f=%g: too broadband (95%% energy below %.0f Hz)", name, f, e95);
-            // Shape: the minimum-phase pulse is front-loaded, the Ricker is centred at 1.5/f
+            {   // lobe structure: Gauss = one positive lobe, GaussDeriv = peak then equal trough
+                double mn = 0, mx = 0; size_t imn = 0, imx = 0;
+                for (size_t k = 0; k < v.size(); k++) { if (v[k] > mx) { mx = v[k]; imx = k; } if (v[k] < mn) { mn = v[k]; imn = k; } }
+                if (gauss) CHECK(mn > -1e-6, "gauss f=%g: negative lobe %.3g", f, mn);
+                if (w == Wavelet::GaussDeriv)
+                    CHECK(imx < imn && std::fabs(mn + mx) < 1e-3, "gaussder f=%g: not peak-then-trough (%.3f / %.3f)", f, mx, mn);
+            }
+            // Shape: the minimum-phase pulse is front-loaded, the others are centred at 1.5/f
             double eAll = 0, eHalf = 0;
             for (size_t k = 0; k < v.size(); k++) { eAll += v[k] * v[k]; if (k * dt < 0.5 / f) eHalf += v[k] * v[k]; }
             const double frac = eHalf / eAll;
             std::printf("           energy in the first half period: %.0f%%\n", 100 * frac);
             if (w == Wavelet::MinPhase) CHECK(frac > 0.2, "minphase f=%g: not front-loaded (%.0f%% in 0.5/f)", f, 100 * frac);
-            else CHECK(frac < 0.01, "ricker f=%g: energy before 0.5/f (%.0f%%)", f, 100 * frac);
+            else CHECK(frac < 0.01, "%s f=%g: energy before 0.5/f (%.0f%%)", name, f, 100 * frac);
         }
+}
+
+// Temporal blocking must not change a single bit: pipelined vs barrier scheme, same batches
+// (moving source, expanding-box rows, free surface, recording).
+static void testPipelineMatchesBarrier() {
+    std::printf("[pipeline] temporally blocked CPU scheme == barrier scheme\n");
+    for (bool fs : {true, false}) {
+        Setup s = makeSetup(1200, 480, 4.0);
+        if (!fs) cpmlZ(s.H, 40, s.dt, s.oceanY, s.SCALE, false, s.bz, s.az);
+        const size_t sismoSize = (size_t)(s.nRec * 2 + s.nObs) * 550;
+        CpuSolver a, b;
+        for (CpuSolver* c : {&a, &b}) {
+            c->init(s.W, s.H, 6, sismoSize);
+            c->setVsq(s.vsq);
+            c->setCpml(s.bx, s.ax, s.bz, s.az);
+        }
+        a.setPipelined(false);
+        b.setPipelined(true);
+        for (int batch = 0; batch < 6; batch++) {
+            auto st = makeSteps(s, batch * 97, 97, 3000);   // odd batch size: steps % threads != 0
+            BatchJob J = makeJob(s, st, 10);
+            J.freeSurface = fs;
+            J.bymin = 3 + batch; J.bymax = s.H - 2;          // band narrower than the grid
+            a.submit(J); a.wait();
+            b.submit(J); b.wait();
+        }
+        double maxP = 0, dP = 0, dS = 0;
+        for (size_t i = 0; i < a.P().size(); i++) {
+            maxP = std::max(maxP, (double)std::fabs(a.P()[i]));
+            dP = std::max(dP, (double)std::fabs(a.P()[i] - b.P()[i]));
+        }
+        for (size_t i = 0; i < sismoSize; i++) dS = std::max(dS, (double)std::fabs(a.sismo()[i] - b.sismo()[i]));
+        std::printf("  fs=%d  max|P|=%.4g  |P diff|=%.3g  |sismo diff|=%.3g\n", fs, maxP, dP, dS);
+        CHECK(maxP > 1e-6, "pipeline test: empty wavefield");
+        CHECK(dP == 0.0 && dS == 0.0, "pipelined result differs from the barrier scheme (fs=%d)", fs);
+    }
+}
+
+// Source wavelet through the whole controller (Simulation: wavelet table, half-integral
+// compensation, point source, expanding box / eikonal, free surface, seismogram recording):
+// Ricker and minimum phase x expanding box on/off x free surface on/off.
+//   free surface off: the recorded pulse is the target wavelet (one arrival)
+//   free surface on : direct pulse minus its surface ghost (image source mirrored about the
+//                     Dirichlet row), each with 2D far-field spreading 1/sqrt(r)
+//   expanding box on/off: identical traces
+static void testSourceWaveletController() {
+    std::printf("[source] wavelet shape through the controller: eikonal box x free surface\n");
+    const double f = 50.0;
+    for (Wavelet w : kAllWavelets) {
+        const char* name = waveletName(w);
+        for (bool fs : {false, true}) {
+            std::vector<double> traces[2];
+            double corr = 0, fPeak = 0;
+            for (int box = 0; box < 2; box++) {
+                Simulation sim;
+                SimParams& p = sim.p;
+                p.domain_W = 1200; p.domain_H = 2000; p.dh = 4; p.dt = 0.5f; p.fd_order = 10;
+                p.geology = GeologyModel::Flat;          // seafloor at 1040 m: its echo arrives after 0.8 s
+                p.wavelet = w; p.freq = (float)f; p.amp = 2;
+                p.free_surface = fs; p.expanding_box = box == 1;
+                p.ship_speed_knots = 0;                  // one shot, stationary geometry
+                p.sismo_ms = 300; p.cable_len = 100; p.receiver_spacing = 12.5f;
+                p.cable_head_depth = p.cable_tail_depth = 150; p.source_depth = 8;
+                p.ship_src_dist = 50; p.src_rec_dist = 100;
+                sim.OCEAN_Y = p.domain_H * 0.166;
+                sim.init(false);
+                sim.onShipX(750);                        // source at x = 700 m, head receiver at 600 m
+                sim.startMode(Mode::Trad);
+                const double T_sismo = std::floor((p.sismo_ms * 6.0) / (sim.SCALE * p.dt));
+                double now = 0;
+                while (sim.cycle_t < T_sismo + 5) { now += 1.0 / 60; sim.update(now, 1.0 / 60); }
+                sim.cpuSolver().wait();
+                const int head = sim.N_REC - 1;
+                traces[box].assign(sim.sismo.begin() + (size_t)head * GH, sim.sismo.begin() + (size_t)(head + 1) * GH);
+
+                if (box == 0) {
+                    // Expected trace from the grid positions of source, receiver and mirror plane
+                    const double S = sim.SCALE, dtp = sim.dtPhy();
+                    const int si = (int)std::floor((750.0 - 50.0) / S), sj = (int)std::floor((sim.OCEAN_Y + 8.0) / S);
+                    const int ri = (int)std::floor((750.0 - 50.0 - 100.0) / S), rj = (int)std::floor((sim.OCEAN_Y + 150.0) / S);
+                    const int sjImg = 2 * sim.sjSurf() - sj;
+                    const double r1 = S * std::hypot(si - ri, sj - rj), r2 = S * std::hypot(si - ri, sjImg - rj);
+                    const std::vector<double> tp = targetPulse(w, 3 * kPulseRate);
+                    std::vector<double> e(GH);
+                    for (int g = 0; g < GH; g++) {
+                        const double t = (g + 0.5) * (T_sismo / GH) * dtp;   // row centre
+                        e[g] = pulseAt(tp, f, t - r1 / 1500.0) / std::sqrt(r1);
+                        if (fs) e[g] -= pulseAt(tp, f, t - r2 / 1500.0) / std::sqrt(r2);
+                    }
+                    const std::vector<double>& m = traces[0];
+                    double ne = 0, nm = 0;
+                    for (int g = 0; g < GH; g++) { ne += e[g] * e[g]; nm += m[g] * m[g]; }
+                    for (int lag = -20; lag <= 20; lag++) {   // small global timing offset allowed
+                        double c = 0;
+                        for (int g = 0; g < GH; g++) if (g + lag >= 0 && g + lag < GH) c += e[g] * m[g + lag];
+                        corr = std::max(corr, c / std::sqrt(ne * nm + 1e-300));
+                    }
+                    // Spectral peak of the recorded trace (free surface off: should be f)
+                    const double dts = (T_sismo / GH) * dtp;
+                    double best = 0;
+                    for (double fr = 5; fr <= 150; fr += 0.5) {
+                        double re = 0, im = 0;
+                        for (int g = 0; g < GH; g++) { re += m[g] * std::cos(2 * M_PI * fr * g * dts); im -= m[g] * std::sin(2 * M_PI * fr * g * dts); }
+                        if (std::hypot(re, im) > best) { best = std::hypot(re, im); fPeak = fr; }
+                    }
+                }
+            }
+            double mx = 0, d = 0;
+            for (int g = 0; g < GH; g++) { mx = std::max(mx, std::fabs(traces[0][g])); d = std::max(d, std::fabs(traces[0][g] - traces[1][g])); }
+            std::printf("  %-8s fs=%d  corr with expected=%.4f  peak=%.1f Hz  box on/off diff=%.2e (of %.3g)\n", name, fs, corr,
+                        fPeak, d / std::max(mx, 1e-30), mx);
+            CHECK(mx > 1e-6, "%s fs=%d: nothing recorded", name, fs);
+            CHECK(corr > (w == Wavelet::Gauss ? 0.90 : 0.98), "%s fs=%d: recorded pulse does not match the expected shape (%.4f)", name, fs, corr);
+            CHECK(d <= 1e-5 * mx, "%s fs=%d: expanding box changes the trace (%.2e)", name, fs, d / mx);
+            if (!fs && w != Wavelet::Gauss) CHECK(std::fabs(fPeak - f) <= 0.06 * f, "%s: recorded dominant frequency %.1f Hz", name, fPeak);
+        }
+    }
 }
 
 static void testSegy() {
@@ -583,13 +716,17 @@ static double radiatedPulse(Wavelet w, const char* dumpPath = nullptr, double* p
 
 static void testRadiatedPulse() {
     std::printf("[radiation] pulse 60 cells from the source matches the selected wavelet\n");
-    for (Wavelet w : {Wavelet::Ricker, Wavelet::MinPhase}) {
+    for (Wavelet w : kAllWavelets) {
         double fPeak = 0;
         const double c = radiatedPulse(w, nullptr, &fPeak);
-        const char* name = w == Wavelet::Ricker ? "ricker" : "minphase";
-        std::printf("  %-8s correlation with target pulse = %.4f  radiated peak %.1f Hz (set 50 Hz)\n", name, c, fPeak);
-        CHECK(c > 0.99, "%s: radiated pulse differs from the wavelet (corr %.4f)", name, c);
-        CHECK(std::fabs(fPeak - 50) <= 2.5, "%s: radiated dominant frequency %.1f Hz instead of 50", name, fPeak);
+        const char* name = waveletName(w);
+        std::printf("  %-8s correlation with target pulse = %.4f  radiated peak %.1f Hz\n", name, c, fPeak);
+        // The Gaussian cannot be radiated with its net area (see SourcePulse): its main lobe matches,
+        // followed by a shallow undershoot. The Gauss derivative's spectrum falls off slower than
+        // the Ricker's (95 % of the energy below 2 f instead of 1.7 f): a little grid dispersion.
+        const double bar = w == Wavelet::Gauss ? 0.90 : w == Wavelet::GaussDeriv ? 0.98 : 0.99;
+        CHECK(c > bar, "%s: radiated pulse differs from the wavelet (corr %.4f)", name, c);
+        if (w != Wavelet::Gauss) CHECK(std::fabs(fPeak - 50) <= 2.5, "%s: radiated dominant frequency %.1f Hz instead of 50", name, fPeak);
     }
 }
 
@@ -671,7 +808,7 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (argc > 2 && std::string(argv[1]) == "--trace") {
-        radiatedPulse(argc > 3 && std::string(argv[3]) == "minphase" ? Wavelet::MinPhase : Wavelet::Ricker, argv[2]);
+        radiatedPulse(waveletFromArg(argc > 3 ? argv[3] : ""), argv[2]);
         glfwTerminate();
         return 0;
     }
@@ -688,6 +825,8 @@ int main(int argc, char** argv) {
     testEikonal();
     testWavelets();
     testRadiatedPulse();
+    testPipelineMatchesBarrier();
+    testSourceWaveletController();
     testSegy();
     testJson();
     if (doBench) bench(haveGpu);

@@ -44,6 +44,8 @@ public:
     bool instabilityDetected() const { return unstable_.load(); }
     void resetInstability() { unstable_ = false; }
     const std::vector<ThreadStat>& lastStats() const { return stats_; }
+    // Temporal blocking (pipelined wavefront) instead of one barrier per phase
+    void setPipelined(bool on) { usePipeline_ = on; }
 
     // Direct field access for tests
     const std::vector<float>& P() const { return P_; }
@@ -51,8 +53,10 @@ public:
 private:
     void shutdown();
     void workerMain(int t);
-    template <int ORD> void runJob(int t);
+    template <int ORD> void runJob(int t);         // barrier per phase, rows split across threads
+    template <int ORD> void runPipelined(int t);   // temporal blocking: one step per thread, wavefront
     void serialPhase(int s);
+    void serialRows(int s, int ra, int rb);
     void pixelPhase(int t);
 
     int W_ = 0, H_ = 0, nThreads_ = 0;
@@ -78,4 +82,7 @@ private:
     std::atomic<bool> busy_{false};
     std::atomic<bool> unstable_{false};
     std::vector<ThreadStat> stats_;
+    std::unique_ptr<std::atomic<int64_t>[]> prog_;   // per thread: step * (H + 1) + pressure front
+    bool usePipeline_ = true, pipelined_ = true;
+    static constexpr int kPipeRows = 8;
 };

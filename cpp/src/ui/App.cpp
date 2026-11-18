@@ -340,12 +340,12 @@ void App::tabPhysics(double now) {
     EndCard();
     ImGui::TableNextColumn();
     if (BeginCard("##cardSig", "🌊 SİNYAL ÖZELLİKLERİ")) {
-        static const char* wav[] = {"Ricker (Sıfır Faz)", "Minimum Faz"};
+        static const char* wav[] = {"Ricker (Sıfır Faz)", "Minimum Faz", "Gauss", "Gauss 1. Türevi"};
         int w = (int)p.wavelet;
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted("Dalgacık Tipi");
         ImGui::SameLine(ImGui::GetContentRegionAvail().x - S(180));
-        if (StyledCombo("##wavelet", &w, wav, 2, S(180))) p.wavelet = (Wavelet)w;
+        if (StyledCombo("##wavelet", &w, wav, 4, S(180))) p.wavelet = (Wavelet)w;
         ParamRow("Dominant Frekans (Hz)", "freq", &p.freq, 0.5f, 250.0f, 0.5f, "%.1f");
         ParamRow("Kaynak Amplitüdü", "amp", &p.amp, 0.2f, 20.0f, 0.2f, "%.1f");
     }

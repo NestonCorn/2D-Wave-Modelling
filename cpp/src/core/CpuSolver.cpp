@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <immintrin.h>
 #include "Params.hpp"
@@ -251,6 +252,7 @@ void CpuSolver::init(int W, int H, int nThreads, size_t sismoSize) {
         nThreads_ = nThreads;
         barrier_ = std::make_unique<std::barrier<>>(nThreads_);
         stats_.assign(nThreads_, {});
+        prog_ = std::make_unique<std::atomic<int64_t>[]>(nThreads_);
         for (int t = 0; t < nThreads_; t++) threads_.emplace_back(&CpuSolver::workerMain, this, t);
     }
     W_ = W; H_ = H;
@@ -311,6 +313,9 @@ void CpuSolver::submit(const BatchJob& job) {
         rowMin_.clear(); rowMax_.clear();
     }
     for (auto& s : stats_) s = {};
+    pipelined_ = usePipeline_;
+    if (const char* e = std::getenv("FDTD_PIPELINE")) pipelined_ = e[0] == '1';
+    for (int i = 0; i < nThreads_; i++) prog_[i].store(-1, std::memory_order_relaxed);
     remaining_ = nThreads_;
     busy_.store(true, std::memory_order_release);
     {
@@ -332,12 +337,22 @@ void CpuSolver::workerMain(int t) {
             if (quit_) return;
             seen = gen_;
         }
-        switch (job_.fd_order) {
-            case 2: runJob<2>(t); break;
-            case 4: runJob<4>(t); break;
-            case 6: runJob<6>(t); break;
-            case 8: runJob<8>(t); break;
-            default: runJob<10>(t); break;
+        if (pipelined_) {
+            switch (job_.fd_order) {
+                case 2: runPipelined<2>(t); break;
+                case 4: runPipelined<4>(t); break;
+                case 6: runPipelined<6>(t); break;
+                case 8: runPipelined<8>(t); break;
+                default: runPipelined<10>(t); break;
+            }
+        } else {
+            switch (job_.fd_order) {
+                case 2: runJob<2>(t); break;
+                case 4: runJob<4>(t); break;
+                case 6: runJob<6>(t); break;
+                case 8: runJob<8>(t); break;
+                default: runJob<10>(t); break;
+            }
         }
         if (job_.renderPixels) pixelPhase(t);
         if (t == 0 && job_.probeRow >= 0 && job_.probeRow < H_) {
@@ -392,11 +407,88 @@ void CpuSolver::runJob(int t) {
     }
 }
 
-void CpuSolver::serialPhase(int s) {
+// ── Temporal blocking: pipelined wavefront ───────────────────────────────────
+// Thread t advances steps t, t+T, t+2T, ... over all rows, in bands of kPipeRows rows,
+// trailing the thread that advances the previous step. T consecutive steps are in flight
+// at once and follow each other a few bands apart, so a band of rows is reused from
+// cache T times before it goes back to memory (the barrier scheme streamed the whole
+// grid from RAM every step), and the three global barriers per step disappear.
+//
+// Dependencies (H2 = stencil half-width):
+//   velocity of step s on rows [q0, q1) reads P of step s-1 on rows < q1 + H2 and
+//   overwrites the V that step s-1's pressure still needs on rows >= its front - H2,
+//   so it waits until step s-1's pressure front (with injection / recording) >= q1 + H2;
+//   pressure of step s on rows < q1 - H2 + 1 needs this step's V only up to row q1 - 1.
+// Progress is published as step * (H + 1) + front (monotonic per thread).
+template <int ORD>
+void CpuSolver::runPipelined(int t) {
+    const BatchJob& J = job_;
+    const int W = W_, H = H_, T = nThreads_;
+    constexpr int H2 = ORD / 2;
+    const int y0 = std::max(0, J.bymin), y1 = std::min(H, J.bymax);
+    const int bx0 = std::max(0, J.bxmin), bx1 = J.bxmax;
+    const int fsEnd = J.freeSurface ? J.sj_surf + 1 : 0;
+    const int fsx0 = std::max(0, J.bxmin), fsx1 = std::min(W - 1, J.bxmax);
+    const int64_t stride = (int64_t)H + 1;
+    ThreadStat& st = stats_[t];
+
+    auto publish = [&](int s, int front) { prog_[t].store((int64_t)s * stride + front, std::memory_order_release); };
+    auto waitFor = [&](int s, int rows) {   // step s-1 final on rows < rows
+        if (s == 0) return;
+        const int64_t need = (int64_t)(s - 1) * stride + std::min(rows, H);
+        std::atomic<int64_t>& p = prog_[(s - 1) % T];
+        if (p.load(std::memory_order_acquire) >= need) return;
+        const auto w0 = Clock::now();
+        int spins = 0;
+        while (p.load(std::memory_order_acquire) < need) {
+            _mm_pause();
+            if (++spins > 4000) { std::this_thread::yield(); spins = 0; }
+        }
+        st.wait += msSince(w0, Clock::now());
+    };
+
+    for (int s = t; s < J.steps; s += T) {
+        const auto c0 = Clock::now();
+        const double waited0 = st.wait;
+        serialRows(s, 0, y0);   // rows above the band are not updated: final already
+        int front = y0;
+        publish(s, front);
+        for (int q0 = y0; q0 < y1; q0 += kPipeRows) {
+            const int q1 = std::min(y1, q0 + kPipeRows);
+            waitFor(s, q1 >= y1 ? H : q1 + H2);
+            velocityRows<ORD>(q0, q1, bx0, bx1, W, H, J.dt, xi0_, xi1_, P_.data(), Vx_.data(), Vz_.data(),
+                              psiVx_.data(), psiVz_.data(), bx_.data(), ax_.data(), bz_.data(), az_.data());
+            const int pEnd = q1 >= y1 ? y1 : std::max(front, q1 - H2 + 1);
+            if (pEnd > front) {
+                pressureRows<ORD>(front, pEnd, bx0, bx1, W, H, J.dt, xi0_, xi1_, P_.data(), Vx_.data(), Vz_.data(),
+                                  Vsq_.data(), psiPx_.data(), psiPz_.data(), bx_.data(), ax_.data(), bz_.data(), az_.data());
+                for (int j = front; j < std::min(pEnd, fsEnd); j++) {   // Dirichlet free surface
+                    float* row = P_.data() + (size_t)j * W;
+                    std::fill(row + fsx0, row + fsx1 + 1, 0.0f);
+                }
+                serialRows(s, front, pEnd);
+                front = pEnd;
+                publish(s, front);
+            }
+        }
+        serialRows(s, y1, H);
+        publish(s, H);
+        st.compute += msSince(c0, Clock::now()) - (st.wait - waited0);
+    }
+    barrier_->arrive_and_wait();   // every step done before the pixel / probe passes
+}
+
+void CpuSolver::serialPhase(int s) { serialRows(s, 0, H_); }
+
+// Source injection + sismogram recording of step s for the sources / receivers whose grid
+// row lies in [ra, rb) (rows outside the grid count as row 0 / H - 1). The pipelined
+// scheme calls it as its pressure front passes each band of rows.
+void CpuSolver::serialRows(int s, int ra, int rb) {
     const BatchJob& J = job_;
     const StepData& sd = steps_[s];
     const int W = W_, H = H_;
     float* P = P_.data();
+    auto inRows = [&](int sj) { const int r = std::clamp(sj, 0, H - 1); return r >= ra && r < rb; };
 
     // Source injection (main, then secondary) at a single cell. The HTML spread it over a
     // 7x7 Gaussian (sigma = 1 cell), which low-passes the radiated wave by exp(-(k sigma)^2/2):
@@ -406,6 +498,7 @@ void CpuSolver::serialPhase(int s) {
     const int sjMinSrc = J.freeSurface ? J.sj_surf : -1;
     auto inject = [&](float si_f, float sj_f, float val) {
         const int si = (int)si_f, sj = (int)sj_f;
+        if (!inRows(sj)) return;
         if (si > 1 && si < W - 1 && sj > 1 && sj < H - 1 && sj > sjMinSrc) P[(size_t)sj * W + si] += val * kSourceGain;
     };
     if (sd.act0 > 0.5f) inject(sd.si0, sd.sj0, sd.val0);
@@ -420,6 +513,7 @@ void CpuSolver::serialPhase(int s) {
     float* sis = sismo_.data();
     const float w = sd.rec_w > 0.0f ? sd.rec_w : 1.0f;
     auto record = [&](int si, int sj, size_t idx) {
+        if (!inRows(sj)) return;
         float amp = (si > 0 && si < W && sj > 0 && sj < H) ? P[(size_t)sj * W + si] : 0.0f;
         sis[idx] += amp * w;
     };
