@@ -9,6 +9,12 @@ enum class Wavelet { Ricker = 0, MinPhase = 1, Gauss = 2, GaussDeriv = 3 };
 // Sismogram panel size in logical pixels (GW x GH in the HTML)
 constexpr int GW = 598;
 constexpr int GH = 550;
+// Samples stored per sismogram trace (the stride of every trace in the sismo buffers). It
+// used to be GH, one sample per panel pixel: a 4000 ms record then had 7.3 ms samples, and a
+// 50 Hz wavelet (main lobe ~10 ms) was caught at a different phase on every trace - the
+// direct arrival changed shape and amplitude from trace to trace. A record uses
+// Simulation::sismoSamples() of them, each the mean of the same number of time steps.
+constexpr int kSismoStride = 4096;
 constexpr int MAX_STEPS = 2048;   // GPU step-data buffer size / batch cap
 
 struct SimParams {

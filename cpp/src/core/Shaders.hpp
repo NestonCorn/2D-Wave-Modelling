@@ -23,6 +23,7 @@ struct StepData {
 };
 layout(std430, binding = 10) readonly buffer B10 { StepData steps[]; };
 layout(std430, binding = 11) readonly buffer B11 { vec2 obsPos[]; };  // OBS x, depth (m)
+layout(std430, binding = 12) readonly buffer B12 { float recvK[]; };  // recvKernelTable()
 
 layout(std140, binding = 0) uniform Params {
     int W; int H; int boxX0; int boxY0;
@@ -118,6 +119,7 @@ void main() {
 // Phase 3c: sismogram recording (streamer receivers, then OBS)
 inline const char* kSismo = R"GLSL(
 layout(local_size_x = 128) in;
+float node(int i, int j) { return (i > 0 && i < W && j > 0 && j < H) ? P[j * W + i] : 0.0; }
 void main() {
     int r = int(gl_GlobalInvocationID.x);
     StepData s = steps[uStep];
@@ -136,8 +138,23 @@ void main() {
         rx = obsPos[o].x; ry = obsPos[o].y;
         base = nRec * 2 * GH + o * GH;
     }
-    int si = int(floor(rx / scale)), sj = int(floor(ry / scale));
-    float amp = (si > 0 && si < W && sj > 0 && sj < H) ? P[sj * W + si] : 0.0;
+    // Kaiser-windowed sinc along x (recvKernel in SolverTypes.hpp, tabulated), linear along z
+    // (see CpuSolver::serialRows)
+    float fx = rx / scale, fy = ry / scale;
+    float x0 = floor(fx), y0 = floor(fy);
+    int i0 = int(x0), j0 = int(y0);
+    float t = fx - x0, wy = fy - y0;
+    float top = 0.0, bot = 0.0, sum = 0.0;
+    for (int k = 0; k < 2 * RECV_HALF; k++) {
+        float x = (t - float(k - RECV_HALF + 1) + float(RECV_HALF)) * float(RECV_RES);
+        int q = min(int(x), 2 * RECV_HALF * RECV_RES - 1);
+        float v = recvK[q] + (x - float(q)) * (recvK[q + 1] - recvK[q]);
+        sum += v;
+        top += v * node(i0 - RECV_HALF + 1 + k, j0);
+        bot += v * node(i0 - RECV_HALF + 1 + k, j0 + 1);
+    }
+    top /= sum; bot /= sum;
+    float amp = top + wy * (bot - top);
     int idx = base + gy;
     sismo[idx] += amp * (s.rec_w > 0.0 ? s.rec_w : 1.0);   // mean over the row's steps
 }

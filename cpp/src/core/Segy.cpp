@@ -59,7 +59,7 @@ std::string jsNum(float v) {
     return std::string(buf, r.ptr);
 }
 
-std::vector<float> resampleGather(const float* sismo, size_t offset, int nTraces, int oldS, int newS) {
+std::vector<float> resampleGather(const float* sismo, size_t offset, int nTraces, int stride, int oldS, int newS) {
     std::vector<float> out((size_t)nTraces * newS);
     for (int tr = 0; tr < nTraces; tr++) {
         for (int s = 0; s < newS; s++) {
@@ -67,8 +67,8 @@ std::vector<float> resampleGather(const float* sismo, size_t offset, int nTraces
             int s0 = (int)std::floor(mapped);
             int s1 = std::min(s0 + 1, oldS - 1);
             double f = mapped - s0;
-            double v0 = sismo[offset + (size_t)tr * oldS + s0];
-            double v1 = sismo[offset + (size_t)tr * oldS + s1];
+            double v0 = sismo[offset + (size_t)tr * stride + s0];
+            double v1 = sismo[offset + (size_t)tr * stride + s1];
             out[(size_t)tr * newS + s] = (float)(v0 * (1 - f) + v1 * f);
         }
     }

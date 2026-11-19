@@ -69,8 +69,8 @@ private:
     // Current job (owned copies of the caller's arrays)
     BatchJob job_;
     std::vector<StepData> steps_;
-    std::vector<float> obsX_, obsY_;
-    std::vector<int> rowMin_, rowMax_, obsSi_, obsSj_;
+    std::vector<int> rowMin_, rowMax_;
+    std::vector<float> obsX_, obsY_;   // OBS positions in grid cells
 
     std::vector<std::thread> threads_;
     std::unique_ptr<std::barrier<>> barrier_;

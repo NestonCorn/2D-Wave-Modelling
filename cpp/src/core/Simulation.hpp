@@ -76,6 +76,15 @@ public:
     // Expanding box for drawing (getEikonalBox(cycle_t * dt_phy) with the toggles applied)
     bool drawBox(EikBox& out) const;
     double dtPhy() const { return (SCALE / 6000.0) * p.dt; }
+    // Length of the record in time steps. Sample g of a trace is the mean of the steps
+    // t_local in [g k, g k + k - 1] (k = sismoStepsPerSample(), the smallest that fits the
+    // record in kSismoStride samples): every sample spans the same time, so the wavelet is
+    // sampled at evenly spaced times on every trace.
+    double sismoSteps() const { return std::floor((p.sismo_ms * 6.0) / (SCALE * p.dt)); }
+    int sismoStepsPerSample() const { return std::max(1, (int)std::ceil(sismoSteps() / kSismoStride)); }
+    int sismoSamples() const {
+        return std::clamp((int)std::ceil(sismoSteps() / sismoStepsPerSample()), 1, kSismoStride);
+    }
     int sjSurf() const { return (int)std::floor(OCEAN_Y / SCALE); }
 
     // Alerts raised by actions (UI shows them in a modal, then clears)

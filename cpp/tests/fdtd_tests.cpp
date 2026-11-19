@@ -98,7 +98,7 @@ static void testParity(bool haveGpu) {
         const int order = cs.order;
         Setup s = makeSetup(1200, 480, cs.scale);
         if (!cs.fs) cpmlZ(s.H, 40, s.dt, s.oceanY, s.SCALE, false, s.bz, s.az);
-        const size_t sismoSize = (size_t)(s.nRec * 2 + s.nObs) * 550;
+        const size_t sismoSize = (size_t)(s.nRec * 2 + s.nObs) * kSismoStride;
         CpuSolver cpu;
         cpu.init(s.W, s.H, 4, sismoSize);
         cpu.setVsq(s.vsq);
@@ -147,7 +147,7 @@ static void testParity(bool haveGpu) {
 static void testPixels() {
     std::printf("[pixels] CPU colormap pass produces visible wavefield\n");
     Setup s = makeSetup(1200, 480, 4.0);
-    const size_t sismoSize = (size_t)(s.nRec * 2 + s.nObs) * 550;
+    const size_t sismoSize = (size_t)(s.nRec * 2 + s.nObs) * kSismoStride;
     CpuSolver cpu;
     cpu.init(s.W, s.H, 4, sismoSize);
     cpu.setVsq(s.vsq);
@@ -176,7 +176,7 @@ static void testInstability(bool haveGpu) {
     s.dt = 1.5;   // far above dt_max = 0.79 for O10
     cpmlX(s.W, 40, s.dt, s.bx, s.ax);
     cpmlZ(s.H, 40, s.dt, s.oceanY, s.SCALE, true, s.bz, s.az);
-    const size_t sismoSize = (size_t)(s.nRec * 2 + s.nObs) * 550;
+    const size_t sismoSize = (size_t)(s.nRec * 2 + s.nObs) * kSismoStride;
     auto st = makeSteps(s, 0, 600, 1e9);
     for (auto& d : st) d.rec_valid = 0;   // recording window over: sismo check alone would miss it
     BatchJob J = makeJob(s, st, 10);
@@ -312,7 +312,7 @@ static void testPipelineMatchesBarrier() {
     for (bool fs : {true, false}) {
         Setup s = makeSetup(1200, 480, 4.0);
         if (!fs) cpmlZ(s.H, 40, s.dt, s.oceanY, s.SCALE, false, s.bz, s.az);
-        const size_t sismoSize = (size_t)(s.nRec * 2 + s.nObs) * 550;
+        const size_t sismoSize = (size_t)(s.nRec * 2 + s.nObs) * kSismoStride;
         CpuSolver a, b;
         for (CpuSolver* c : {&a, &b}) {
             c->init(s.W, s.H, 6, sismoSize);
@@ -376,7 +376,8 @@ static void testSourceWaveletController() {
                 while (sim.cycle_t < T_sismo + 5) { now += 1.0 / 60; sim.update(now, 1.0 / 60); }
                 sim.cpuSolver().wait();
                 const int head = sim.N_REC - 1;
-                traces[box].assign(sim.sismo.begin() + (size_t)head * GH, sim.sismo.begin() + (size_t)(head + 1) * GH);
+                const int NSm = sim.sismoSamples();
+                traces[box].assign(sim.sismo.begin() + (size_t)head * kSismoStride, sim.sismo.begin() + (size_t)head * kSismoStride + NSm);
 
                 if (box == 0) {
                     // Expected trace from the grid positions of source, receiver and mirror plane
@@ -386,32 +387,33 @@ static void testSourceWaveletController() {
                     const int sjImg = 2 * sim.sjSurf() - sj;
                     const double r1 = S * std::hypot(si - ri, sj - rj), r2 = S * std::hypot(si - ri, sjImg - rj);
                     const std::vector<double> tp = targetPulse(w, 3 * kPulseRate);
-                    std::vector<double> e(GH);
-                    for (int g = 0; g < GH; g++) {
-                        const double t = (g + 0.5) * (T_sismo / GH) * dtp;   // row centre
+                    std::vector<double> e(NSm);
+                    for (int g = 0; g < NSm; g++) {
+                        const int KS = sim.sismoStepsPerSample();   // sample centre: mean of its steps
+                        const double t = 0.5 * (std::max(1, g * KS) + std::min((int)T_sismo, g * KS + KS - 1)) * dtp;
                         e[g] = pulseAt(tp, f, t - r1 / 1500.0) / std::sqrt(r1);
                         if (fs) e[g] -= pulseAt(tp, f, t - r2 / 1500.0) / std::sqrt(r2);
                     }
                     const std::vector<double>& m = traces[0];
                     double ne = 0, nm = 0;
-                    for (int g = 0; g < GH; g++) { ne += e[g] * e[g]; nm += m[g] * m[g]; }
-                    for (int lag = -20; lag <= 20; lag++) {   // small global timing offset allowed
+                    for (int g = 0; g < NSm; g++) { ne += e[g] * e[g]; nm += m[g] * m[g]; }
+                    for (int lag = -40; lag <= 40; lag++) {   // small global timing offset allowed
                         double c = 0;
-                        for (int g = 0; g < GH; g++) if (g + lag >= 0 && g + lag < GH) c += e[g] * m[g + lag];
+                        for (int g = 0; g < NSm; g++) if (g + lag >= 0 && g + lag < NSm) c += e[g] * m[g + lag];
                         corr = std::max(corr, c / std::sqrt(ne * nm + 1e-300));
                     }
                     // Spectral peak of the recorded trace (free surface off: should be f)
-                    const double dts = (T_sismo / GH) * dtp;
+                    const double dts = sim.sismoStepsPerSample() * dtp;
                     double best = 0;
                     for (double fr = 5; fr <= 150; fr += 0.5) {
                         double re = 0, im = 0;
-                        for (int g = 0; g < GH; g++) { re += m[g] * std::cos(2 * M_PI * fr * g * dts); im -= m[g] * std::sin(2 * M_PI * fr * g * dts); }
+                        for (int g = 0; g < NSm; g++) { re += m[g] * std::cos(2 * M_PI * fr * g * dts); im -= m[g] * std::sin(2 * M_PI * fr * g * dts); }
                         if (std::hypot(re, im) > best) { best = std::hypot(re, im); fPeak = fr; }
                     }
                 }
             }
             double mx = 0, d = 0;
-            for (int g = 0; g < GH; g++) { mx = std::max(mx, std::fabs(traces[0][g])); d = std::max(d, std::fabs(traces[0][g] - traces[1][g])); }
+            for (int g = 0; g < (int)traces[0].size(); g++) { mx = std::max(mx, std::fabs(traces[0][g])); d = std::max(d, std::fabs(traces[0][g] - traces[1][g])); }
             std::printf("  %-8s fs=%d  corr with expected=%.4f  peak=%.1f Hz  box on/off diff=%.2e (of %.3g)\n", name, fs, corr,
                         fPeak, d / std::max(mx, 1e-30), mx);
             CHECK(mx > 1e-6, "%s fs=%d: nothing recorded", name, fs);
@@ -419,6 +421,99 @@ static void testSourceWaveletController() {
             CHECK(d <= 1e-5 * mx, "%s fs=%d: expanding box changes the trace (%.2e)", name, fs, d / mx);
             if (!fs && w != Wavelet::Gauss) CHECK(std::fabs(fPeak - f) <= 0.06 * f, "%s: recorded dominant frequency %.1f Hz", name, fPeak);
         }
+    }
+}
+
+// A streamer whose spacing (6.25 m) is not a multiple of the grid (4 m) must still record an
+// even direct-arrival moveout and a smooth amplitude decay: receivers are interpolated, not
+// snapped to the nearest node. Two geometries: horizontal (cable at the source depth, no
+// free surface: time linear in offset, amplitude ~ offset^-1/2) and the default marine one
+// (free surface, source 8 m, cable 10 m: the ghost shapes the decay, so only trace-to-trace
+// jumps are checked there - the second difference along the cable).
+static void testReceiverInterpolation() {
+    std::printf("[receivers] direct arrival on a 6.25 m streamer over a 4 m grid (CPU; testParity covers the GPU)\n");
+    for (bool marine : {false, true}) {
+        Simulation sim;
+        SimParams& p = sim.p;
+        p.domain_W = 1600; p.domain_H = 2000; p.dh = 4; p.dt = 0.5f; p.fd_order = 10;
+        p.geology = GeologyModel::Flat; p.wavelet = Wavelet::Ricker; p.freq = 50; p.amp = 2;
+        p.free_surface = marine; p.expanding_box = false; p.ship_speed_knots = 0;
+        // The default 4000 ms record: with one sample per panel pixel (7.3 ms) the 50 Hz
+        // arrival changed shape and amplitude from trace to trace
+        p.sismo_ms = 4000; p.cable_len = 350; p.receiver_spacing = 6.25f;
+        p.cable_head_depth = p.cable_tail_depth = marine ? 10.0f : 8.0f; p.source_depth = 8;
+        p.ship_src_dist = 50; p.src_rec_dist = 100;
+        sim.OCEAN_Y = p.domain_H * 0.166;
+        sim.init(false);
+        sim.onShipX(1300);                       // source at 1250 m, receivers 900..1150 m
+        sim.startMode(Mode::Trad);
+        const double T_sismo = sim.sismoSteps();
+        const int NS = sim.sismoSamples();
+        double now = 0;
+        while (sim.cycle_t < 0.33 / sim.dtPhy()) { now += 1.0 / 60; sim.update(now, 1.0 / 60); }   // past 300 m
+        sim.cpuSolver().wait();
+        const double dts = sim.sismoStepsPerSample() * sim.dtPhy() * 1000.0;   // ms per sample
+        // Strongest lobe of the direct arrival (its sign from the nearest trace): time and
+        // amplitude of its interpolated peak, offsets 100..300 m
+        std::vector<double> off, tt, aa;
+        double sgn = 0;
+        for (int r = sim.N_REC - 1; r >= 0; r--) {
+            const double o = p.src_rec_dist + p.cable_len - r * p.receiver_spacing;
+            if (o > 300.0) break;
+            const float* tr = sim.sismo.data() + (size_t)r * kSismoStride;
+            const int g0 = (int)(o / 1.5 / dts), g1 = std::min(NS - 2, (int)((o / 1.5 + 70) / dts));
+            if (sgn == 0) {
+                int k = g0;
+                for (int g = g0; g <= g1; g++) if (std::fabs(tr[g]) > std::fabs(tr[k])) k = g;
+                sgn = tr[k] > 0 ? 1.0 : -1.0;
+            }
+            int k = g0;
+            for (int g = g0; g <= g1; g++) if (sgn * tr[g] > sgn * tr[k]) k = g;
+            // band-limited peak: 6-point Lagrange interpolation, 1/64-sample steps around k
+            double bestV = -1e30, bestT = k;
+            for (int q = -64; q <= 64; q++) {
+                const double x = k + q / 64.0, x0 = std::floor(x), t = x - x0;
+                double v = 0;
+                for (int c = 0; c < 6; c++) {
+                    double wgt = 1;
+                    for (int m = 0; m < 6; m++) if (m != c) wgt *= (t - (m - 2)) / (double)(c - m);
+                    v += wgt * sgn * tr[(int)x0 - 2 + c];
+                }
+                if (v > bestV) { bestV = v; bestT = x; }
+            }
+            off.push_back(o); tt.push_back(bestT * dts); aa.push_back(std::log(bestV));
+        }
+        // residuals from least-squares fits: t = a + b*offset, ln|A| = a + b*ln(offset)
+        auto fitRes = [](const std::vector<double>& x, const std::vector<double>& y) {
+            const size_t n = x.size();
+            double sx = 0, sy = 0, sxx = 0, sxy = 0;
+            for (size_t i = 0; i < n; i++) { sx += x[i]; sy += y[i]; sxx += x[i] * x[i]; sxy += x[i] * y[i]; }
+            const double b = (n * sxy - sx * sy) / (n * sxx - sx * sx), a = (sy - b * sx) / n;
+            double m = 0;
+            for (size_t i = 0; i < n; i++) m = std::max(m, std::fabs(y[i] - a - b * x[i]));
+            return m;
+        };
+        auto jump = [](const std::vector<double>& y) {   // max |second difference|
+            double m = 0;
+            for (size_t i = 1; i + 1 < y.size(); i++) m = std::max(m, std::fabs(y[i - 1] - 2 * y[i] + y[i + 1]));
+            return m;
+        };
+        std::vector<double> lo(off.size());
+        for (size_t i = 0; i < off.size(); i++) lo[i] = std::log(off[i]);
+        const char* name = marine ? "marine" : "level";
+        const double tJ = jump(tt), aJ = jump(aa);
+        std::printf("  %-6s %zu traces  2nd difference: time %.3f ms  amplitude %.2f%%", name, off.size(), tJ, 100 * aJ);
+        CHECK(off.size() >= 30, "%s: too few traces (%zu)", name, off.size());
+        CHECK(tJ < 0.1, "%s: trace-to-trace jumps in the direct-arrival time (%.3f ms)", name, tJ);
+        // marine: most of it is the curvature of the ghosted offset^-3/2 decay itself
+        CHECK(aJ < (marine ? 0.012 : 0.006), "%s: trace-to-trace jumps in the direct-arrival amplitude (%.2f%%)", name, 100 * aJ);
+        if (!marine) {
+            const double tRes = fitRes(off, tt), aRes = fitRes(lo, aa);
+            std::printf("  fit residual: time %.3f ms  amplitude %.2f%%", tRes, 100 * (std::exp(aRes) - 1));
+            CHECK(tRes < 0.05, "level: uneven direct-arrival moveout (%.3f ms)", tRes);
+            CHECK(aRes < 0.003, "level: uneven direct-arrival amplitude (%.2f%%)", 100 * (std::exp(aRes) - 1));
+        }
+        std::printf("\n");
     }
 }
 
@@ -443,7 +538,7 @@ static void testSegy() {
     uint32_t u = be32(th + 240 + 4);
     float f; std::memcpy(&f, &u, 4);
     CHECK(f == tr[100 + 1], "sample value %g", f);
-    auto rs = resampleGather(tr.data(), 0, 1, 100, 199);
+    auto rs = resampleGather(tr.data(), 0, 1, 100, 100, 199);
     CHECK(std::fabs(rs[1] - 0.25f) < 1e-6f && rs[198] == tr[99], "resampler");
 }
 
@@ -485,7 +580,7 @@ static void bench(bool haveGpu) {
                           {"large 25000x12000 m @ 4 m", 25000, 12000, 4}};
     for (const Case& c : cases) {
         Setup s = makeSetup(c.W, c.H, c.dh);
-        const size_t sismoSize = (size_t)(s.nRec * 2 + s.nObs) * 550;
+        const size_t sismoSize = (size_t)(s.nRec * 2 + s.nObs) * kSismoStride;
         const int steps = c.W * c.H / (c.dh * c.dh) > 5e6 ? 40 : 400;
         auto st = makeSteps(s, 0, steps, 1e9);
         BatchJob J = makeJob(s, st, 10);
@@ -553,7 +648,7 @@ static void writePgm(const std::string& path, const std::vector<float>& P, int W
 
 static void snapshots(const std::string& dir, bool haveGpu) {
     Setup s = makeSetup(1200, 480, 4.0);
-    const size_t sismoSize = (size_t)(s.nRec * 2 + s.nObs) * 550;
+    const size_t sismoSize = (size_t)(s.nRec * 2 + s.nObs) * kSismoStride;
     CpuSolver cpu;
     cpu.init(s.W, s.H, 4, sismoSize);
     cpu.setVsq(s.vsq);
@@ -633,7 +728,7 @@ static void pmlCheck() {
         Setup s = makeSetup(1200, 480, 4.0);
         std::fill(s.vsq.begin(), s.vsq.end(), v * v);
         cpmlZ(s.H, 40, s.dt, s.oceanY, s.SCALE, false, s.bz, s.az);
-        const size_t sismoSize = (size_t)(s.nRec * 2 + s.nObs) * 550;
+        const size_t sismoSize = (size_t)(s.nRec * 2 + s.nObs) * kSismoStride;
         CpuSolver cpu;
         cpu.init(s.W, s.H, 4, sismoSize);
         cpu.setVsq(s.vsq);
@@ -667,7 +762,7 @@ static double radiatedPulse(Wavelet w, const char* dumpPath = nullptr, double* p
     std::fill(s.vsq.begin(), s.vsq.end(), 0.0625f);
     cpmlZ(s.H, 40, s.dt, s.oceanY, s.SCALE, false, s.bz, s.az);
     CpuSolver cpu;
-    cpu.init(s.W, s.H, 4, (size_t)(s.nRec * 2 + s.nObs) * 550);
+    cpu.init(s.W, s.H, 4, (size_t)(s.nRec * 2 + s.nObs) * kSismoStride);
     cpu.setVsq(s.vsq);
     cpu.setCpml(s.bx, s.ax, s.bz, s.az);
     const double f = 50, dtp = s.SCALE / 6000.0 * s.dt;
@@ -827,6 +922,7 @@ int main(int argc, char** argv) {
     testRadiatedPulse();
     testPipelineMatchesBarrier();
     testSourceWaveletController();
+    testReceiverInterpolation();
     testSegy();
     testJson();
     if (doBench) bench(haveGpu);

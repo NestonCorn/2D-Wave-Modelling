@@ -93,9 +93,12 @@ void ensureTexture(GatherView& gv, int slot, int w, int h, bool smooth) {
 void renderTraces(const Panel& pn, Simulation& sim, GatherView& gv, int slot, size_t offset, int count, int max_y,
                   float baseX, float displayW, ImU32 color) {
     if (max_y <= 0 || count <= 0) return;
-    if (offset + (size_t)(count - 1) * GH + max_y >= sim.sismo.size()) return;
+    constexpr size_t S = kSismoStride;   // trace stride; sample g is at time g * KS steps
+    if (offset + (size_t)(count - 1) * S + max_y >= sim.sismo.size()) return;
     const float gain = sim.p.gain;
     const float* data = sim.sismo.data() + offset;
+    // panel pixels per sample (zoom 1: the whole record spans DRAW_H)
+    const float pxPerSample = DRAW_H * sim.sismoStepsPerSample() / (float)std::max(1.0, sim.sismoSteps());
     ImDrawList* dl = pn.dl;
 
     if (gv.vd) {
@@ -104,7 +107,7 @@ void renderTraces(const Panel& pn, Simulation& sim, GatherView& gv, int slot, si
         const int w = count, h = max_y + 1;
         const float scale = gain * 1.5f;
         const float X0 = baseX + gv.panX, ww = displayW * gv.zoomX;
-        const float Y0 = MARGIN_TOP + gv.panY, hh = (h / (float)GH) * DRAW_H * gv.zoomY;
+        const float Y0 = MARGIN_TOP + gv.panY, hh = h * pxPerSample * gv.zoomY;
         dl->AddCallback(setNormal, nullptr);   // opaque image: no additive blending
         if (gv.smooth) {
             // Bicubic (Catmull-Rom) resampling at screen resolution over the visible part only
@@ -130,18 +133,43 @@ void renderTraces(const Panel& pn, Simulation& sim, GatherView& gv, int slot, si
                 }
             };
             taps(ow, w, vx0, vx1 - vx0, X0, ww, gv.colIdx, gv.colW);
-            taps(oh, h, vy0, vy1 - vy0, Y0, hh, gv.rowIdx, gv.rowW);
+            // Rows: cubic when zoomed in; when an output row covers more than one sample, the
+            // mean of the samples it covers (point sampling would alias the wavelet again).
+            const bool boxRows = h / (float)oh * ((vy1 - vy0) / hh) > 1.0f;
+            if (boxRows) {
+                gv.rowIdx.resize((size_t)oh * 2);
+                for (int o = 0; o < oh; o++) {
+                    const float u0 = (vy0 + o * (vy1 - vy0) / oh - Y0) / hh * h;
+                    const float u1 = (vy0 + (o + 1) * (vy1 - vy0) / oh - Y0) / hh * h;
+                    const int a = std::clamp((int)std::floor(u0), 0, h - 1);
+                    gv.rowIdx[(size_t)o * 2] = a;
+                    gv.rowIdx[(size_t)o * 2 + 1] = std::clamp((int)std::ceil(u1), a + 1, h);
+                }
+            } else {
+                taps(oh, h, vy0, vy1 - vy0, Y0, hh, gv.rowIdx, gv.rowW);
+            }
             const int t0 = gv.colIdx.front(), t1 = gv.colIdx.back();   // traces actually referenced
             const int nt = t1 - t0 + 1;
 
             gv.vdTmp.resize((size_t)nt);
             gv.vdBuf.resize((size_t)ow * oh);
             for (int oy = 0; oy < oh; oy++) {
-                const int* ri = &gv.rowIdx[(size_t)oy * 4];
-                const float* rw = &gv.rowW[(size_t)oy * 4];
-                for (int i = 0; i < nt; i++) {   // vertical pass
-                    const float* tr = data + (size_t)(t0 + i) * GH;
-                    gv.vdTmp[i] = rw[0] * tr[ri[0]] + rw[1] * tr[ri[1]] + rw[2] * tr[ri[2]] + rw[3] * tr[ri[3]];
+                if (boxRows) {
+                    const int a = gv.rowIdx[(size_t)oy * 2], b = gv.rowIdx[(size_t)oy * 2 + 1];
+                    const float inv = 1.0f / (float)(b - a);
+                    for (int i = 0; i < nt; i++) {   // vertical pass: mean
+                        const float* tr = data + (size_t)(t0 + i) * S;
+                        float acc = 0.0f;
+                        for (int y = a; y < b; y++) acc += tr[y];
+                        gv.vdTmp[i] = acc * inv;
+                    }
+                } else {
+                    const int* ri = &gv.rowIdx[(size_t)oy * 4];
+                    const float* rw = &gv.rowW[(size_t)oy * 4];
+                    for (int i = 0; i < nt; i++) {   // vertical pass: cubic
+                        const float* tr = data + (size_t)(t0 + i) * S;
+                        gv.vdTmp[i] = rw[0] * tr[ri[0]] + rw[1] * tr[ri[1]] + rw[2] * tr[ri[2]] + rw[3] * tr[ri[3]];
+                    }
                 }
                 uint32_t* out = &gv.vdBuf[(size_t)oy * ow];
                 for (int ox = 0; ox < ow; ox++) {   // horizontal pass + colormap
@@ -160,7 +188,7 @@ void renderTraces(const Panel& pn, Simulation& sim, GatherView& gv, int slot, si
             // One texel per (trace, sample), nearest-neighbour
             gv.vdBuf.resize((size_t)w * h);
             for (int i = 0; i < count; i++) {
-                const float* tr = data + (size_t)i * GH;
+                const float* tr = data + (size_t)i * S;
                 for (int y = 0; y < h; y++) gv.vdBuf[(size_t)y * w + i] = grayRGBA(tr[y] * scale);
             }
             ensureTexture(gv, slot, w, h, false);
@@ -179,7 +207,7 @@ void renderTraces(const Panel& pn, Simulation& sim, GatherView& gv, int slot, si
     if (trSpacing < 2.0f) step = (int)std::ceil(2.0f / trSpacing);
     const float eff = trSpacing * step;
     const float maxDx = std::min(eff * 1.5f, 30.0f);
-    const float yScale = DRAW_H * gv.zoomY / GH;
+    const float yScale = pxPerSample * gv.zoomY;   // panel pixels per sample
     const float y0 = MARGIN_TOP + gv.panY;
 
     // Cubic interpolation: when the samples are more than about 1.5 screen pixels apart, every
@@ -198,10 +226,43 @@ void renderTraces(const Panel& pn, Simulation& sim, GatherView& gv, int slot, si
     const ImU32 strokeCol = eff < 2.0f ? (color & 0x00FFFFFF) | ((ImU32)(0.7f * 255) << 24) : rgba(232, 244, 253, 0.6f);
     const float strokeW = (eff < 2.0f ? 0.4f : 0.6f) * pn.k;
 
+    // Zoomed out, several samples share a screen pixel. Drawing every one would be hundreds of
+    // thousands of quads, and drawing every dec-th would alias the wavelet - each trace would
+    // show a different part of it. Instead each group of `dec` samples (about one device pixel)
+    // is drawn as its min / max: the band-limited trace's true extent at that pixel.
+    const int dec = yScale * pn.k < 0.5f ? (int)std::floor(1.0f / (yScale * pn.k)) : 1;
+    auto drawEnvelope = [&](const float* tr, float gx) {
+        auto dxOf = [&](float v) { return std::clamp(v * gain * 2.5f, -maxDx, maxDx); };
+        line.clear();
+        if (qBeg == 0) line.push_back(pn.P(gx, y0));
+        for (int g = qBeg; g <= qEnd; g += dec) {
+            const int e = std::min(g + dec, qEnd + 1);
+            int imn = g, imx = g;
+            for (int y = g + 1; y < e; y++) {
+                if (tr[y] < tr[imn]) imn = y;
+                if (tr[y] > tr[imx]) imx = y;
+            }
+            const float mn = dxOf(tr[imn]), mx = dxOf(tr[imx]);
+            const float ya = y0 + g * yScale, yb = y0 + e * yScale, ym = 0.5f * (ya + yb);
+            if (eff >= 1.5f) {
+                if (mx > 0) dl->AddRectFilled(pn.P(gx, ya), pn.P(gx + mx, yb), color);
+                if (mn < 0) dl->AddRectFilled(pn.P(gx + mn, ya), pn.P(gx, yb), color);
+            }
+            const bool minFirst = imn <= imx;
+            line.push_back(pn.P(gx + (minFirst ? mn : mx), ym));
+            if (mn != mx) line.push_back(pn.P(gx + (minFirst ? mx : mn), ym));
+        }
+        if (line.size() > 1) dl->AddPolyline(line.data(), (int)line.size(), strokeCol, 0, std::max(strokeW, 0.5f));
+    };
+
     for (int i = 0; i < count; i += step) {
         const float gx = baseX + gv.panX + i * trSpacing;
         if (gx < MARGIN_LEFT - maxDx || gx > GW - 20 + maxDx) continue;
-        const float* tr = data + (size_t)i * GH;
+        const float* tr = data + (size_t)i * S;
+        if (dec > 1) {   // several samples per screen pixel: min / max of each group
+            drawEnvelope(tr, gx);
+            continue;
+        }
         // Point q of the trace: sample q / sub, cubic (Catmull-Rom) between the recorded samples.
         // Samples after max_y are not recorded yet, so the last one is repeated there.
         auto dxAt = [&](int q) {
@@ -326,8 +387,9 @@ void drawGatherPanel(Simulation& sim, GatherView& gv, int panel, ImVec2 o, float
     }
 
     // ── Traces (drawSismogram, additive) ──
-    const double T_ticks = std::floor((p.sismo_ms * 6.0) / (sim.SCALE * p.dt));
-    const int yProgress = sim.cycle_t >= T_ticks ? GH - 1 : (int)std::floor((sim.cycle_t / T_ticks) * GH);
+    const double T_ticks = sim.sismoSteps();
+    const int nS = sim.sismoSamples();   // last sample recorded so far
+    const int yProgress = sim.cycle_t >= T_ticks ? nS - 1 : std::min(nS - 1, (int)std::floor(sim.cycle_t / sim.sismoStepsPerSample()));
     dl->AddCallback(setAdditive, nullptr);
     if (!isOBS) {
         const float total = totalOffsetMax(sim);
@@ -337,10 +399,10 @@ void drawGatherPanel(Simulation& sim, GatherView& gv, int panel, ImVec2 o, float
         if (sim.lastMode == Mode::CLO) {
             const float xr2 = MARGIN_LEFT + (1.0f - (p.src_rec_dist + p.src_offset) / total) * PLOT_W;
             const float xl2 = MARGIN_LEFT + (1.0f - (p.src_rec_dist + p.src_offset + p.cable_len) / total) * PLOT_W;
-            renderTraces(pn, sim, gv, 1, (size_t)sim.N_REC * GH, sim.N_REC, yProgress, xl2, xr2 - xl2, hex(0x1e90ff));
+            renderTraces(pn, sim, gv, 1, (size_t)sim.N_REC * kSismoStride, sim.N_REC, yProgress, xl2, xr2 - xl2, hex(0x1e90ff));
         }
     } else if (p.obs_enabled) {
-        renderTraces(pn, sim, gv, 2, (size_t)sim.N_REC * 2 * GH, sim.N_OBS, yProgress, MARGIN_LEFT, PLOT_W, hex(0xfbbf24));
+        renderTraces(pn, sim, gv, 2, (size_t)sim.N_REC * 2 * kSismoStride, sim.N_OBS, yProgress, MARGIN_LEFT, PLOT_W, hex(0xfbbf24));
     }
     dl->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
     dl->PopClipRect();

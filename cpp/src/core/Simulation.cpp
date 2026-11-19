@@ -109,7 +109,7 @@ void Simulation::regridNow() {
 
 void Simulation::rebuildEngines() {
     waitInFlight(false);
-    const size_t sismoSize = (size_t)(N_REC * 2 + N_OBS) * GH;
+    const size_t sismoSize = (size_t)(N_REC * 2 + N_OBS) * kSismoStride;
     int hc = (int)std::thread::hardware_concurrency();
     if (hc <= 0) hc = 4;
     // The CPU engine runs the pipelined (temporally blocked) scheme: each thread advances its
@@ -486,6 +486,7 @@ void Simulation::submitBatch(int steps) {
     const double cur_t_max = mps > 0 ? std::floor((p.shot_interval * 6000.0) / (mps * SCALE * p.dt))
                                      : std::numeric_limits<double>::infinity();
     const double T_sismo = std::floor((p.sismo_ms * 6.0) / (SCALE * p.dt));
+    const int NS = sismoSamples(), KS = sismoStepsPerSample();
 
     boxFor(simTime_ + steps * dt_phy, batchBox_);
     const bool rowsValid = p.expanding_box && batchBox_.hasRows;
@@ -512,15 +513,15 @@ void Simulation::submitBatch(int steps) {
         }
         const bool shot2 = (mode == Mode::CLO && cyc >= cur_t_max);
         const double t_local = shot2 ? cyc - cur_t_max : cyc;
-        int gy = (int)std::floor((t_local / T_sismo) * GH);
-        d.rec_valid = (mode != Mode::None && t_local <= T_sismo && gy >= 0 && gy < GH) ? 1.f : 0.f;
+        int gy = (int)std::floor(t_local / KS);
+        d.rec_valid = (mode != Mode::None && t_local <= T_sismo && gy >= 0 && gy < NS) ? 1.f : 0.f;
         d.gy_pix = (float)gy;
-        {   // number of recorded steps (integer t_local in [1, T_sismo]) that map to row gy
-            const double lo = std::max(1.0, std::ceil(gy * T_sismo / GH));
-            const double hi = std::min(T_sismo, std::ceil((gy + 1) * T_sismo / GH) - 1.0);
+        {   // number of recorded steps (integer t_local in [1, T_sismo]) that map to sample gy
+            const double lo = std::max(1.0, (double)gy * KS);
+            const double hi = std::min(T_sismo, (double)gy * KS + KS - 1.0);
             d.rec_w = (float)(1.0 / std::max(1.0, hi - lo + 1.0));
         }
-        d.sismo_off = shot2 ? (float)(N_REC * GH) : 0.f;
+        d.sismo_off = shot2 ? (float)((size_t)N_REC * kSismoStride) : 0.f;
         d.sxShip = (float)sx;
         d.ry_head = (float)(OCEAN_Y + p.cable_head_depth);
         d.ry_tail = (float)(OCEAN_Y + p.cable_tail_depth);
@@ -756,9 +757,10 @@ void Simulation::segySnapshotAndSave() {
     const int dtMicros = 1000;
     const std::string modeLabel = mode == Mode::CLO ? "CLO" : mode == Mode::SLO ? "SLO" : "NONE";
 
-    auto snap1 = resampleGather(sismo.data(), 0, N_REC, GH, targetSamples);
-    auto snap2 = resampleGather(sismo.data(), (size_t)N_REC * GH, N_REC, GH, targetSamples);
-    auto snapO = resampleGather(sismo.data(), (size_t)N_REC * 2 * GH, N_OBS, GH, targetSamples);
+    const int ns = sismoSamples();
+    auto snap1 = resampleGather(sismo.data(), 0, N_REC, kSismoStride, ns, targetSamples);
+    auto snap2 = resampleGather(sismo.data(), (size_t)N_REC * kSismoStride, N_REC, kSismoStride, ns, targetSamples);
+    auto snapO = resampleGather(sismo.data(), (size_t)N_REC * 2 * kSismoStride, N_OBS, kSismoStride, ns, targetSamples);
     auto anyNonZero = [](const std::vector<float>& v) {
         return std::any_of(v.begin(), v.end(), [](float x) { return x != 0.0f; });
     };

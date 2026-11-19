@@ -22,8 +22,9 @@ struct SegySpec {
 
 std::vector<uint8_t> buildSegy(const SegySpec& s);
 
-// Linear resampler: GH-pixel traces → new_samples traces (1 ms each in practice)
-std::vector<float> resampleGather(const float* sismo, size_t offset, int nTraces, int oldSamples, int newSamples);
+// Linear resampler: traces of oldSamples samples (stored `stride` apart) → newSamples samples
+// (1 ms each in practice)
+std::vector<float> resampleGather(const float* sismo, size_t offset, int nTraces, int stride, int oldSamples, int newSamples);
 
 // JavaScript-style number → string (shortest round-trip, no trailing ".0")
 std::string jsNum(double v);

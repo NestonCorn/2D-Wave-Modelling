@@ -19,7 +19,7 @@ int tileDim(int which) {
 }
 int tileX() { return tileDim(0); }
 int tileY() { return tileDim(1); }
-enum Binding { B_P = 0, B_VX, B_VZ, B_VSQ, B_PSIVX, B_PSIVZ, B_PSIPX, B_PSIPZ, B_CPML, B_SISMO, B_STEPS, B_OBS };
+enum Binding { B_P = 0, B_VX, B_VZ, B_VSQ, B_PSIVX, B_PSIVZ, B_PSIPX, B_PSIPZ, B_CPML, B_SISMO, B_STEPS, B_OBS, B_RECVK, B_COUNT };
 
 struct ParamsUBO {   // std140, all scalars → tightly packed
     int W, H, boxX0, boxY0;
@@ -63,7 +63,7 @@ void GpuSolver::destroy() {
         for (unsigned prog : {p.vel, p.pres, p.src, p.sismo, p.pix})
             if (prog) glDeleteProgram(prog);
     programs_.clear();
-    if (buf_[0]) glDeleteBuffers(12, buf_);
+    if (buf_[0]) glDeleteBuffers(B_COUNT, buf_);
     std::memset(buf_, 0, sizeof(buf_));
     if (ubo_) glDeleteBuffers(1, &ubo_);
     if (readback_) glDeleteBuffers(1, &readback_);
@@ -75,10 +75,10 @@ bool GpuSolver::init(int W, int H, int nRec, int nObs, std::string& err) {
     destroy();
     W_ = W; H_ = H; nRec_ = nRec; nObs_ = nObs;
     const size_t N = (size_t)W * H;
-    sismoSize_ = (size_t)(nRec * 2 + nObs) * GH;
+    sismoSize_ = (size_t)(nRec * 2 + nObs) * kSismoStride;
     sismo_.assign(sismoSize_, 0.0f);
 
-    glGenBuffers(12, buf_);
+    glGenBuffers(B_COUNT, buf_);
     // Immutable, GPU-only storage for the big field buffers. With glBufferData(GL_DYNAMIC_DRAW)
     // the AMD driver placed them in system memory once they outgrew the caches, and every step
     // streamed the whole wavefield over PCIe (~14 GB/s, i.e. ~200 Mcells/s on any grid size).
@@ -96,6 +96,12 @@ bool GpuSolver::init(int W, int H, int nRec, int nObs, std::string& err) {
     alloc(B_SISMO, sismoSize_ * 4, false);
     alloc(B_STEPS, (size_t)MAX_STEPS * sizeof(StepData), true);
     alloc(B_OBS, (size_t)std::max(1, nObs) * 8, true);
+    {   // receiver interpolation kernel: constant, uploaded once
+        const std::vector<float>& tb = recvKernelTable();
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, buf_[B_RECVK]);
+        if (glBufferStorage) glBufferStorage(GL_SHADER_STORAGE_BUFFER, tb.size() * 4, tb.data(), 0);
+        else glBufferData(GL_SHADER_STORAGE_BUFFER, tb.size() * 4, tb.data(), GL_STATIC_DRAW);
+    }
 
     glGenBuffers(1, &ubo_);
     glBindBuffer(GL_UNIFORM_BUFFER, ubo_);
@@ -116,7 +122,8 @@ bool GpuSolver::init(int W, int H, int nRec, int nObs, std::string& err) {
 
 unsigned GpuSolver::makeProgram(int order, const char* body, std::string& err) {
     std::string src = "#version 430\n#define FD_ORDER " + std::to_string(order) + "\n#define TILE_X " + std::to_string(tileX()) +
-                      "\n#define TILE_Y " + std::to_string(tileY()) + "\n" + shaders::kHeader + body;
+                      "\n#define TILE_Y " + std::to_string(tileY()) + "\n#define RECV_HALF " + std::to_string(kRecvHalf) +
+                      "\n#define RECV_RES " + std::to_string(kRecvRes) + "\n" + shaders::kHeader + body;
     const char* s = src.c_str();
     GLuint sh = glCreateShader(GL_COMPUTE_SHADER);
     glShaderSource(sh, 1, &s, nullptr);
@@ -218,14 +225,14 @@ void GpuSolver::submit(const BatchJob& J, unsigned waveTex) {
     u.boxX0 = J.bxmin; u.boxY0 = J.bymin; u.boxX1 = J.bxmax; u.boxY1 = J.bymax;
     u.sjSurf = J.sj_surf; u.nRec = nRec_; u.nObs = nObs_;
     u.freeSurf = J.freeSurface ? 1 : 0; u.dt = J.dt; u.scale = J.SCALE;
-    u.cable = J.cable_len; u.gain = J.gainNorm; u.GH_ = GH;
+    u.cable = J.cable_len; u.gain = J.gainNorm; u.GH_ = kSismoStride;   // trace stride of the sismo buffer
     glBindBuffer(GL_UNIFORM_BUFFER, ubo_);
     glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(u), &u);
     glBindBufferBase(GL_UNIFORM_BUFFER, 0, ubo_);
 
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, buf_[B_STEPS]);
     glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, (size_t)steps * sizeof(StepData), J.stepData);
-    for (int b = 0; b < 12; b++) glBindBufferBase(GL_SHADER_STORAGE_BUFFER, b, buf_[b]);
+    for (int b = 0; b < B_COUNT; b++) glBindBufferBase(GL_SHADER_STORAGE_BUFFER, b, buf_[b]);
 
     const int x0 = std::max(0, J.bxmin), y0 = std::max(0, J.bymin);
     const int boxW = std::max(0, J.bxmax - x0 + 1), boxH = std::max(0, J.bymax - y0 + 1);

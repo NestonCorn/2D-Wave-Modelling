@@ -301,10 +301,10 @@ void CpuSolver::submit(const BatchJob& job) {
     wait();
     job_ = job;
     steps_.assign(job.stepData, job.stepData + job.steps);
-    obsSi_.resize(job.N_OBS); obsSj_.resize(job.N_OBS);
+    obsX_.resize(job.N_OBS); obsY_.resize(job.N_OBS);
     for (int i = 0; i < job.N_OBS; i++) {
-        obsSi_[i] = (int)std::floor(job.obsX[i] / job.SCALE);
-        obsSj_[i] = (int)std::floor(job.obsY[i] / job.SCALE);
+        obsX_[i] = job.obsX[i] / job.SCALE;
+        obsY_[i] = job.obsY[i] / job.SCALE;
     }
     if (job.rowMin && job.rowMax) {
         rowMin_.assign(job.rowMin, job.rowMin + H_);
@@ -504,18 +504,46 @@ void CpuSolver::serialRows(int s, int ra, int rb) {
     if (sd.act0 > 0.5f) inject(sd.si0, sd.sj0, sd.val0);
     if (sd.act1 > 0.5f) inject(sd.si1, sd.sj1, sd.val1);
 
-    // Sismogram recording: each pixel row holds the mean of the ~T/GH steps that fall in it.
+    // Sismogram recording: each sample holds the mean of the steps that fall in it.
     // (The HTML kept the max-abs sample, which aliased the wavelet into a jagged, sign-flipping
     // pattern; the mean is a box low-pass and gives a smooth trace.)
     if (sd.rec_valid < 0.5f) return;
     const int gy = (int)sd.gy_pix;
-    if (gy < 0 || gy >= GH) return;
+    if (gy < 0 || gy >= kSismoStride) return;
     float* sis = sismo_.data();
     const float w = sd.rec_w > 0.0f ? sd.rec_w : 1.0f;
-    auto record = [&](int si, int sj, size_t idx) {
-        if (!inRows(sj)) return;
-        float amp = (si > 0 && si < W && sj > 0 && sj < H) ? P[(size_t)sj * W + si] : 0.0f;
-        sis[idx] += amp * w;
+    // Receivers are interpolated between grid nodes (node (i, j) sits at (i, j) * SCALE, the
+    // source's convention). Snapping to the nearest node put a 6.25 m streamer on a 4 m grid
+    // at offsets 4 and 8 m apart in turn: the direct arrival stepped 2.5 / 5.4 ms instead of
+    // 4.2 ms and its amplitude stepped with it. Along x, where the direct wave travels, the
+    // interpolation is a windowed sinc (recvKernel, tabulated): a linear one averages the two
+    // sides of a sharp peak (-8 % mid-cell for a 40 Hz Ricker on 4 m). Along z it is linear: all receivers of
+    // a cable at one depth share its weight, and the receiver can then belong to its lower
+    // row j0 + 1 - when the pipelined scheme reaches that row, row j0 is final for this step
+    // and the next step has not started on it.
+    auto node = [&](int i, int j) { return (i > 0 && i < W && j > 0 && j < H) ? P[(size_t)j * W + i] : 0.0f; };
+    auto record = [&](float fx, float fy, size_t idx) {
+        const float x0 = std::floor(fx), y0 = std::floor(fy);
+        const int i0 = (int)x0, j0 = (int)y0;
+        if (!inRows(j0 + 1)) return;
+        const float t = fx - x0, wy = fy - y0;
+        // weights of nodes i0 - kRecvHalf + 1 .. i0 + kRecvHalf, normalised to sum 1
+        constexpr int NT = 2 * kRecvHalf, RES = kRecvRes;
+        const std::vector<float>& table = recvKernelTable();
+        float c[NT], sum = 0.0f;
+        for (int k = 0; k < NT; k++) {
+            const float x = (t - (float)(k - kRecvHalf + 1) + kRecvHalf) * RES;   // in [0, NT * RES]
+            const int q = std::min((int)x, NT * RES - 1);
+            c[k] = table[q] + (x - q) * (table[q + 1] - table[q]);
+            sum += c[k];
+        }
+        auto row = [&](int j) {
+            float s = 0.0f;
+            for (int k = 0; k < NT; k++) s += c[k] * node(i0 - kRecvHalf + 1 + k, j);
+            return s / sum;
+        };
+        const float top = row(j0), bot = row(j0 + 1);
+        sis[idx] += (top + wy * (bot - top)) * w;
     };
     const int off = (int)sd.sismo_off;
     const float spacing = J.N_REC > 1 ? J.cable_len / (float)(J.N_REC - 1) : 0.0f;
@@ -523,10 +551,10 @@ void CpuSolver::serialRows(int s, int ra, int rb) {
         float rx = sd.cable_head_x - J.cable_len + i * spacing;
         float norm = J.N_REC > 1 ? (float)i / (float)(J.N_REC - 1) : 0.0f;
         float ry = sd.ry_tail + (sd.ry_head - sd.ry_tail) * norm;
-        record((int)std::floor(rx / J.SCALE), (int)std::floor(ry / J.SCALE), (size_t)off + (size_t)i * GH + gy);
+        record(rx / J.SCALE, ry / J.SCALE, (size_t)off + (size_t)i * kSismoStride + gy);
     }
-    const size_t obsBase = (size_t)J.N_REC * 2 * GH;
-    for (int i = 0; i < J.N_OBS; i++) record(obsSi_[i], obsSj_[i], obsBase + (size_t)i * GH + gy);
+    const size_t obsBase = (size_t)J.N_REC * 2 * kSismoStride;
+    for (int i = 0; i < J.N_OBS; i++) record(obsX_[i], obsY_[i], obsBase + (size_t)i * kSismoStride + gy);
 }
 
 void CpuSolver::pixelPhase(int t) {

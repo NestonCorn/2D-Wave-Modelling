@@ -51,7 +51,7 @@ private:
     bool ready_ = false;
     int W_ = 0, H_ = 0, nRec_ = 0, nObs_ = 0;
     size_t sismoSize_ = 0;
-    unsigned buf_[12]{};       // SSBOs by binding index
+    unsigned buf_[13]{};       // SSBOs by binding index (Binding in GpuSolver.cpp)
     unsigned ubo_ = 0, readback_ = 0;
     std::map<int, Programs> programs_;
     void* fence_ = nullptr;   // GLsync
