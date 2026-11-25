@@ -585,6 +585,55 @@ static double checkerRms(const std::vector<float>& P, int W, int H) {
     return std::sqrt(e / std::max(1LL, n));
 }
 
+// Live run, record shorter than the sailing time between shots: with skip_gap the ship glides
+// to the next shot instead of sailing through the idle part. Shot positions and recordings
+// must be the same as sailing in real time; only the number of frames changes.
+static void testSkipGap() {
+    std::printf("[skip gap] jumping to the next shot once the record is complete\n");
+    for (Mode m : {Mode::Trad, Mode::CLO}) {
+        std::vector<float> rec[2];
+        double shipX[2] = {0, 0};
+        int frames[2] = {0, 0};
+        for (int skip = 0; skip < 2; skip++) {
+            Simulation sim;
+            sim.p.sismo_ms = 300; sim.p.speed_ms = 40; sim.p.skip_gap = skip == 1;
+            sim.init(false);
+            sim.startMode(m);
+            double now = 0;
+            // Trad: until shot 2's record is complete. CLO: until the source vessel's record is.
+            const double T = sim.sismoSteps();
+            auto done = [&] {
+                if (m == Mode::Trad) return sim.shotsMain >= 2 && sim.cycle_t >= T;
+                const double mps = sim.p.ship_speed_knots * 0.514444;
+                const double sw = std::floor((sim.p.shot_interval * 6000.0) / (mps * sim.SCALE * sim.p.dt));
+                return sim.shotsSrc >= 1 && sim.cycle_t >= sw + T;
+            };
+            while (!done() && frames[skip] < 20000) {   // one batch per frame
+                now += 1.0 / 60;
+                sim.update(now, 1.0 / 60);
+                sim.cpuSolver().wait();
+                frames[skip]++;
+                for (const Shot& sh : sim.shots)   // the shot of interest (cleared when the glide starts)
+                    if (sh.main == (m == Mode::Trad)) shipX[skip] = sh.x;
+            }
+            sim.cpuSolver().wait();
+            rec[skip] = sim.sismo;
+        }
+        // skip off leaves the CLO main shot's (decayed) wave in the field when the source vessel
+        // fires; skip on clears it: compare with a tolerance there
+        double mx = 0, d = 0;
+        for (size_t i = 0; i < rec[0].size(); i++) {
+            mx = std::max(mx, (double)std::fabs(rec[0][i]));
+            d = std::max(d, (double)std::fabs(rec[0][i] - rec[1][i]));
+        }
+        std::printf("  %s: frames %d -> %d, shot source x %.2f / %.2f m, recordings max |diff| %.2e of %.3g\n",
+                    m == Mode::Trad ? "Trad" : "CLO ", frames[0], frames[1], shipX[0], shipX[1], d, mx);
+        CHECK(frames[1] * 2 < frames[0], "skip_gap did not shorten the cycle (%d vs %d frames)", frames[1], frames[0]);
+        CHECK(std::fabs(shipX[0] - shipX[1]) < 1e-6, "shot fired at %.4f instead of %.4f m", shipX[1], shipX[0]);
+        CHECK(mx > 0 && d <= (m == Mode::Trad ? 1e-6 : 1e-3) * mx, "recordings changed (%.2e of %.3g)", d, mx);
+    }
+}
+
 // The injected target must end without a step: the minimum-phase pulse was cut at 3 periods,
 // where it is still 1.2e-3 of its peak, and the step sent grid-scale rings out of the source
 // (well visible at low frequency, where the pulse itself is smooth on the grid).
@@ -1321,6 +1370,7 @@ static void gpuSnapshots(const std::string& dir, float gain, bool minPhase, bool
 int main(int argc, char** argv) {
     const bool doBench = argc > 1 && std::string(argv[1]) == "--bench";
     if (argc > 1 && std::string(argv[1]) == "--moving") { testMovingSource(); return failures ? 1 : 0; }
+    if (argc > 1 && std::string(argv[1]) == "--skipgap") { testSkipGap(); return failures ? 1 : 0; }
     bool haveGpu = false;
     GLFWwindow* win = nullptr;
     if (glfwInit()) {
@@ -1388,6 +1438,7 @@ int main(int argc, char** argv) {
     testSourceWaveletController();
     testReceiverInterpolation();
     testPulseEnd();
+    testSkipGap();
     testMovingSource();
     testDensity();
     testModelImport();

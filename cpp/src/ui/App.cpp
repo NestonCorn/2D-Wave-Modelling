@@ -593,6 +593,11 @@ void App::sectionView() {
     bool draw = !p.sismo_only;
     if (Switch("Dalga alanını çiz", &draw, "Kapatınca yalnız kayıtlar güncellenir; simülasyon daha hızlı ilerler."))
         sim_.toggleSismoOnly();
+    bool skip = p.skip_gap;
+    if (Switch("Kayıt bitince sonraki atışa geç", &skip,
+               "Kayıt uzunluğu dolunca gemi bir sonraki atış konumuna kısa bir geçişle gelir ve yeni atış hemen başlar. "
+               "Kapalıyken gemi atış aralığını gerçek hızıyla kat eder. Atış konumları ve kayıtlar ikisinde de aynıdır."))
+        p.skip_gap = skip;
     ImGui::Dummy(ImVec2(0, S(4)));
 }
 
@@ -808,6 +813,7 @@ void App::scenePane(ImVec2 o, ImVec2 size) {
         dl->AddText(fonts.mono, fonts.mono->FontSize, ImVec2(x, cy - ts.y * 0.5f), col::textHi, t);
         const char* state = sim_.mode == Mode::None ? "Beklemede"
                           : sim_.paused ? "Duraklatıldı"
+                          : sim_.gliding() ? "Sonraki atışa geçiliyor"
                           : sim_.mode == Mode::SLO ? "SLO çalışıyor"
                           : sim_.mode == Mode::CLO ? "CLO çalışıyor" : "Geleneksel çalışıyor";
         const ImU32 sc = sim_.mode == Mode::None ? col::muted : sim_.paused ? col::warn : col::ok;

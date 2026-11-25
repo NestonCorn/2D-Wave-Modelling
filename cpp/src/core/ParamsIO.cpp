@@ -44,6 +44,7 @@ std::string paramsToJson(const SimParams& p, double shipX) {
     j["sl_wavelet"] = p.wavelet == Wavelet::MinPhase ? "minphase" : p.wavelet == Wavelet::Gauss ? "gauss"
                       : p.wavelet == Wavelet::GaussDeriv ? "gaussderiv" : "ricker";   // new in the C++ port
     j["obs_enabled"] = p.obs_enabled;
+    j["skip_gap"] = p.skip_gap;
     return j.dump(2);
 }
 
@@ -116,6 +117,7 @@ bool paramsFromJson(const std::string& text, SimParams& p, double& shipX, std::s
                   : w == "gaussderiv" ? Wavelet::GaussDeriv : Wavelet::Ricker;
     }
     if (j.contains("obs_enabled") && j["obs_enabled"].is_boolean()) p.obs_enabled = j["obs_enabled"].get<bool>();
+    if (j.contains("skip_gap") && j["skip_gap"].is_boolean()) p.skip_gap = j["skip_gap"].get<bool>();
     return true;
 }
 

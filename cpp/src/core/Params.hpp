@@ -54,6 +54,7 @@ struct SimParams {
     // ── Toolbar toggles ──
     bool free_surface = true;
     bool expanding_box = true;
+    bool skip_gap = true;            // live: once the record is complete, glide the ship to the next shot
     bool sismo_only = false;         // "Sadece Sismogram (Turbo)"
 };
 

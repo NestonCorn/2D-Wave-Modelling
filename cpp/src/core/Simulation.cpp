@@ -404,6 +404,7 @@ void Simulation::clearSismoAll() {
 // Modes
 // ══════════════════════════════════════════════════════════════════════════
 void Simulation::startMode(Mode m) {
+    glide_.active = false;
     elapsedSec = 0;
     waitInFlight(false);
     pendingSteps_ = 0;
@@ -426,6 +427,7 @@ void Simulation::startMode(Mode m) {
 }
 
 void Simulation::stopMode() {
+    glide_.active = false;
     elapsedSec = 0;
     waitInFlight(false);
     pendingSteps_ = 0;
@@ -521,6 +523,7 @@ void Simulation::onReceiverSpacing(bool forceReset) {
 
 void Simulation::onShipX(double x) {
     waitInFlight(true);   // otherwise the running batch overwrites the new position when it completes
+    if (glide_.active) { glide_.fromX += x - sxShip; glide_.toX += x - sxShip; }   // the glide moves with the ship
     sxShip = x;
     sxSrc = sxShip + p.src_offset;
 }
@@ -555,6 +558,7 @@ void Simulation::onObsSpacing() {
 // Main loop (port of loop/cpuLoop/gpuLoop)
 // ══════════════════════════════════════════════════════════════════════════
 void Simulation::update(double now, double frameDt) {
+    now_ = now;
     if (mode != Mode::None && !paused && !instability) elapsedSec += frameDt;
 
     if (regridPending_ && now >= regridAt_) {
@@ -589,7 +593,24 @@ void Simulation::update(double now, double frameDt) {
     else loopIteration();
 }
 
+bool Simulation::glideStep() {
+    if (!glide_.active) return false;
+    constexpr double kGlideSec = 0.4;
+    const double u = std::clamp((now_ - glide_.t0) / kGlideSec, 0.0, 1.0);
+    const double e = 1.0 - std::pow(1.0 - u, 3.0);   // ease-out
+    sxShip = glide_.fromX + (glide_.toX - glide_.fromX) * e;
+    sxSrc = sxShip + p.src_offset;
+    if (u < 1.0) return true;
+    glide_.active = false;
+    cycle_t = glide_.target;
+    simTime_ = cycle_t * dtPhy();
+    accumulated_ = 0;
+    if (glide_.fireSrc) fireShot(false, 0);
+    return false;
+}
+
 void Simulation::loopIteration() {
+    if (glideStep()) return;
     const double dt_phy = dtPhy();
     const double spf = (p.speed_ms / 1000.0) / dt_phy;
     accumulated_ += spf;
@@ -612,6 +633,32 @@ void Simulation::loopIteration() {
     if (segyRecording_ && recordDone && !segyShotSaved_) {
         segyShotSaved_ = true;
         segySnapshotAndSave();
+    }
+
+    // Record complete, ship still short of the next shot: skip the idle sailing (the next
+    // shot clears the field and the recordings anyway). CLO has two records per cycle.
+    if (p.skip_gap && std::isfinite(cur_t_max)) {
+        const bool second = mode == Mode::CLO && cycle_t >= cur_t_max;
+        const double recEnd = second ? cur_t_max + T_sismo : T_sismo;
+        const double target = mode == Mode::CLO && !second ? cur_t_max : max_time;
+        if (target > recEnd) {
+            if (cycle_t >= recEnd && cycle_t < target) {
+                shots.clear();          // a long low-frequency pulse must not go on into a cleared field
+                clearAllFields();
+                glide_.active = true;
+                glide_.t0 = now_;
+                glide_.fromX = sxShip;
+                glide_.toX = sxShip + (target - cycle_t) * mps * dt_phy;
+                glide_.target = target;
+                glide_.fireSrc = mode == Mode::CLO && !second;
+                accumulated_ = 0;
+                return;
+            }
+            if (cycle_t < recEnd && cycle_t + stepsD > recEnd) {   // end the batch on the record end
+                accumulated_ += cycle_t + stepsD - recEnd;
+                stepsD = recEnd - cycle_t;
+            }
+        }
     }
 
     if (cycle_t >= max_time) {

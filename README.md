@@ -38,6 +38,7 @@ Tek ekranlık bir çalışma istasyonu düzeni:
 
 **Veri toplama**
 - Geleneksel, SLO ve CLO atış kipleri; hareketli gemi, streamer ve deniz tabanı alıcıları (OBS)
+- Kayıt bitince sonraki atışa geçiş (varsayılan açık): kayıt uzunluğu dolunca gemi kalan yolu kısa bir geçişle kat eder ve yeni atış hemen başlar; atış konumları ve kayıtlar gerçek hızla gitmekle aynıdır
 - Alıcılar ızgaraya yuvarlanmaz: yatayda 12 noktalı Kaiser pencereli sinc, düşeyde doğrusal ara değerlemeyle okunur
 - Her iz 4096 örneğe kadar saklanır (4000 ms kayıtta 1 ms örnek aralığı)
 - Canlı SEG-Y Rev1 kaydı (her atış ayrı dosya), parametrelerin JSON olarak kaydedilip yüklenmesi
@@ -87,6 +88,7 @@ Başsız testler şunları denetler:
 - Yoğunluk: tek yoğunlukta sonucun değişmemesi, yoğunluk sınırında yansıma katsayısının (ρ₂ − ρ₁)/(ρ₂ + ρ₁) çıkması
 - Model dosyaları (SEG-Y IEEE/IBM, ham float32, CSV) ve modelin simülasyona yüklenmesi
 - Dalgacığın basamaksız bitmesi, hareketli kaynağın ızgara gürültüsü üretmemesi
+- Sonraki atışa geçişin atış konumlarını ve kayıtları değiştirmemesi (Geleneksel ve CLO)
 - Hat simülasyonu (iz başlıkları, atışların birbirinden bağımsızlığı, SLO ve CLO kayıtları), SEG-Y düzeni ve JSON gidiş-dönüşü
 
 `--bench` ile hız ölçümü de çalışır. Ortam değişkenleri: `FDTD_PIPELINE=0` CPU zaman bloklamasını kapatır, `FDTD_TILE=64x4` GPU iş grubu boyutunu değiştirir.

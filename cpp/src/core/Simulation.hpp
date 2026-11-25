@@ -109,6 +109,7 @@ public:
     int lineShotsDone() const { return line_.shot; }
     int lineShots() const { return line_.n; }
     double lineFirstX() const { return line_.firstX; }
+    bool gliding() const { return glide_.active; }   // between a finished record and the next shot
     Mode lineMode() const { return line_.mode; }
     double lineProgress() const;   // 0..1 over the whole line
     const std::string& lineFolder() const { return line_.dir; }
@@ -260,5 +261,17 @@ private:
         SegyLineWriter streamer, streamerSrc, obs;
     } line_;
     bool appendLineGathers(bool srcVessel, std::string& err);
+
+    // Skipping the idle part of a live shot cycle: the record is complete but the ship has not
+    // yet sailed one shot interval. The wave field is cleared and the ship glides the rest of
+    // the way in kGlideSec of real time; the cycle then continues at `target` (next shot, or
+    // the CLO source vessel's shot) exactly where sailing in real time would have reached it.
+    struct Glide {
+        bool active = false;
+        double t0 = 0, fromX = 0, toX = 0, target = 0;
+        bool fireSrc = false;           // CLO: the source vessel fires at the end
+    } glide_;
+    double now_ = 0;
+    bool glideStep();                   // true while gliding (no wave steps this frame)
     double cloSwitchStep(double mps) const;   // CLO: step at which the source vessel fires
 };
