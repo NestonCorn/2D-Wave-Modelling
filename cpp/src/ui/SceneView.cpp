@@ -93,17 +93,18 @@ void drawShip(const Canvas& c, const Simulation& sim, float x, float y, ImU32 c1
     dl->AddRectFilled(Q(bx + 6 * rX, by - 4 * rX), Q(bx + 10 * rX, by + 2 * rX), c2);   // tow mast
 
     char buf[96];
-    std::snprintf(buf, sizeof(buf), "%.1f Knot | %.2fm Atis", sim.p.ship_speed_knots, sim.p.shot_interval);
-    float fs = std::max(6.0f, std::round(10.5f * rX)) * c.k;
-    float ls = std::max(6.0f, std::round(10.0f * rX)) * c.k;
+    std::snprintf(buf, sizeof(buf), "%.1f kn, atış %g m", sim.p.ship_speed_knots, sim.p.shot_interval);
+    // Labels never smaller than 11 px on screen (the scene can be drawn much smaller than 1:1)
+    float fs = std::max(S(11.0f), std::round(10.5f * rX) * c.k);
+    float ls = std::max(S(11.5f), std::round(10.0f * rX) * c.k);
     // Keep both labels inside the canvas when the sky band above the water is short
     const float top = c.o.y + fs + S(2);
     ImVec2 lp = Q(bx + W_S / 2, by - 26 * rX);
     lp.y = std::max(lp.y, top);
-    TextAt(dl, fonts.canvasBold, fs, lp, hex(0xff8c42), buf, 1);
+    TextAt(dl, fonts.canvas, fs, lp, col::muted, buf, 1);
     ImVec2 np = Q(0, by - 12 * rX);
     np.y = std::max(np.y, lp.y + ls + S(1));
-    TextAt(dl, fonts.uiBold, ls, np, hex(0xe8f4fd), label, 1);
+    TextAt(dl, fonts.uiBold, ls, np, col::textHi, label, 1);
 }
 
 void drawCable(const Canvas& c, const Simulation& sim, float toPX) {
@@ -124,10 +125,10 @@ void drawCable(const Canvas& c, const Simulation& sim, float toPX) {
         pts.push_back(c.P(x, cy + sway(x)));
         ts.push_back(norm);
     }
-    const ImU32 tailC = rgba(255, 140, 0, 0.4f), headC = hex(0xffd700);
+    const ImU32 tailC = withAlpha(col::accent, 0.45f), headC = col::accent;
     const float w = std::max(1.0f, 3 * rX) * c.k;
     for (size_t i = 0; i + 1 < pts.size(); i++) {
-        c.dl->AddLine(pts[i], pts[i + 1], rgba(255, 215, 0, 0.12f), w * 3.0f);   // glow
+        c.dl->AddLine(pts[i], pts[i + 1], withAlpha(col::accent, 0.10f), w * 3.0f);   // glow
         c.dl->AddLine(pts[i], pts[i + 1], lerpCol(tailC, headC, ts[i]), w);
     }
     // Receivers (every 3rd group)
@@ -150,12 +151,12 @@ void drawCable(const Canvas& c, const Simulation& sim, float toPX) {
 }
 
 void drawOBS(const Canvas& c, float x, float y, float rX) {
-    const ImU32 gold = hex(0xfbbf24);
+    const ImU32 gold = col::warn;
     const ImVec2 a = c.P(x, y);
     for (int k = 2; k >= 1; k--) {
         float e = k * 2.5f * rX;
         c.dl->AddTriangleFilled(c.Q(a, 0, -e), c.Q(a, -5 * rX - e, 8 * rX + e * 0.5f),
-                                c.Q(a, 5 * rX + e, 8 * rX + e * 0.5f), rgba(251, 191, 36, 0.12f));
+                                c.Q(a, 5 * rX + e, 8 * rX + e * 0.5f), withAlpha(col::warn, 0.10f));
     }
     c.dl->AddTriangleFilled(a, c.Q(a, -5 * rX, 8 * rX), c.Q(a, 5 * rX, 8 * rX), gold);
 }
@@ -171,18 +172,24 @@ void drawScene(Simulation& sim, ImDrawList* dl, ImVec2 o, float k, float ky, int
     dl->PushClipRect(c.P(0, 0), c.P(W, H), true);
 
     // Sky → water
-    dl->AddRectFilledMultiColor(c.P(0, 0), c.P(W, OY), hex(0x030914), hex(0x030914), hex(0x041022), hex(0x041022));
-    dl->AddRectFilled(c.P(0, OY), c.P(W, H), hex(0x061225));
-    dl->AddLine(c.P(0, OY), c.P(W, OY), rgba(30, 144, 255, 0.4f), 2 * rX * k);
+    dl->AddRectFilledMultiColor(c.P(0, 0), c.P(W, OY), hex(0x0B1620), hex(0x0B1620), hex(0x0F1E2B), hex(0x0F1E2B));
+    dl->AddRectFilled(c.P(0, OY), c.P(W, H), hex(0x112538));
+    dl->AddLine(c.P(0, OY), c.P(W, OY), withAlpha(col::data, 0.45f), 2 * rX * k);
 
-    // Layers (painter's algorithm)
-    fillBelow(c, sim.layout.seafloor, H, hex(0x102235));
-    strokeCurve(c, sim.layout.seafloor, hex(0x274b7c), 2 * rX * k);
-    fillBelow(c, sim.layout.deep, H, hex(0x0a1628));
-    strokeCurve(c, sim.layout.deep, hex(0x1e3048), 2 * rX * k);
-    if (!sim.layout.salt.empty()) {
-        fillBelow(c, sim.layout.salt, H, hex(0xbdcdde), hex(0x48627e), H * 0.4f, H);
-        strokeCurve(c, sim.layout.salt, hex(0xe8f4fd), 3 * rX * k);
+    if (sim.modelTex) {
+        // Imported model: its velocity image, with the seafloor found in it
+        dl->AddImage((ImTextureID)(intptr_t)sim.modelTex, c.P(0, 0), c.P(W, H));
+        strokeCurve(c, sim.layout.seafloor, hex(0x3A6280), 2 * rX * k);
+    } else {
+        // Layers (painter's algorithm)
+        fillBelow(c, sim.layout.seafloor, H, hex(0x1A3247));
+        strokeCurve(c, sim.layout.seafloor, hex(0x3A6280), 2 * rX * k);
+        fillBelow(c, sim.layout.deep, H, hex(0x22394B));
+        strokeCurve(c, sim.layout.deep, hex(0x456378), 2 * rX * k);
+        if (!sim.layout.salt.empty()) {
+            fillBelow(c, sim.layout.salt, H, hex(0xA9B8C6), hex(0x53697E), H * 0.4f, H);
+            strokeCurve(c, sim.layout.salt, hex(0xD8E2EA), 3 * rX * k);
+        }
     }
 
     // Wavefield texture (GPU writes it directly; CPU path uploads the dirty box)
@@ -236,17 +243,17 @@ void drawScene(Simulation& sim, ImDrawList* dl, ImVec2 o, float k, float ky, int
     const float toPX = W / X_max;
 
     drawCable(c, sim, toPX);
-    drawShip(c, sim, (float)sim.sxShip * toPX, OY, hex(0x1e90ff), hex(0x00d4ff), "ANA GEMİ");
-    drawSourceIcon(c, (float)(sim.sxShip - p.ship_src_dist) * toPX, OY, hex(0x1e90ff), rX);
+    drawShip(c, sim, (float)sim.sxShip * toPX, OY, hex(0x3D8FB8), col::data, "Ana gemi");
+    drawSourceIcon(c, (float)(sim.sxShip - p.ship_src_dist) * toPX, OY, col::data, rX);
     if (sim.lastMode != Mode::Trad) {
-        drawShip(c, sim, (float)sim.sxSrc * toPX, OY, hex(0xff4d6d), hex(0xff8c42), "2. GEMİ");
-        drawSourceIcon(c, (float)(sim.sxSrc - p.ship_src_dist) * toPX, OY, hex(0xff4d6d), rX);
+        drawShip(c, sim, (float)sim.sxSrc * toPX, OY, hex(0xB8483F), col::danger, "Kaynak gemisi");
+        drawSourceIcon(c, (float)(sim.sxSrc - p.ship_src_dist) * toPX, OY, col::danger, rX);
     }
 
     if (p.obs_enabled) {
         for (int i = 0; i < sim.N_OBS; i++) {
             double rx = (i + 1) * (double)p.obs_spacing;
-            double ry = obsSeafloorDepth(p.geology, rx, W, H);
+            double ry = sim.seafloorDepth(rx);
             drawOBS(c, (float)rx * toPX, (float)ry, rX);
         }
     }

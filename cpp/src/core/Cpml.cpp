@@ -1,9 +1,7 @@
 #include "Cpml.hpp"
 #include <cmath>
 
-static const double V_N = 0.68;
-
-void cpmlX(int W_sim, int npml, double dt, std::vector<float>& b, std::vector<float>& a) {
+void cpmlX(int W_sim, int npml, double dt, std::vector<float>& b, std::vector<float>& a, double V_N) {
     b.assign(W_sim, 1.0f);
     a.assign(W_sim, 0.0f);
     const double sigma_max = -3.0 * V_N * std::log(0.001) / (2.0 * npml);
@@ -18,7 +16,7 @@ void cpmlX(int W_sim, int npml, double dt, std::vector<float>& b, std::vector<fl
 }
 
 void cpmlZ(int H_sim, int npml, double dt, double OCEAN_Y, double SCALE, bool freeSurface,
-           std::vector<float>& b, std::vector<float>& a) {
+           std::vector<float>& b, std::vector<float>& a, double V_N) {
     b.assign(H_sim, 1.0f);
     a.assign(H_sim, 0.0f);
     const double sigma_max_base = -3.0 * V_N * std::log(0.001) / 2.0;

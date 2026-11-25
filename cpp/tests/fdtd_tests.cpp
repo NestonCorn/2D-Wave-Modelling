@@ -8,6 +8,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -32,6 +34,13 @@ struct Setup {
     double SCALE, dt = 0.5, oceanY = 80, domW, domH;
     std::vector<float> vsq, bx, ax, bz, az, obsX, obsY;
 };
+
+// Solver material for a test setup: density from the velocity (Gardner), as the app does
+static Material materialOf(const Setup& s) {
+    std::vector<float> rho;
+    densityFromVsq(s.vsq, rho);
+    return makeMaterial(s.vsq, rho, s.W, s.H);
+}
 
 static Setup makeSetup(double domW, double domH, double scale, int npml = 40) {
     Setup s;
@@ -105,7 +114,7 @@ static void testGpuReinit(bool haveGpu) {
         const bool ok = gpu.init(s.W, s.H, s.nRec, s.nObs, err) && gpu.ensurePrograms(6, err);
         CHECK(ok, "GPU init: %s", err.c_str());
         if (!ok) return;
-        gpu.setVsq(s.vsq);
+        gpu.setMaterial(materialOf(s));
         gpu.setCpml(s.bx, s.ax, s.bz, s.az);
         gpu.setObs(s.obsX, s.obsY);
         std::vector<float> v;
@@ -139,14 +148,14 @@ static void testParity(bool haveGpu) {
         const size_t sismoSize = (size_t)(s.nRec * 2 + s.nObs) * kSismoStride;
         CpuSolver cpu;
         cpu.init(s.W, s.H, 4, sismoSize);
-        cpu.setVsq(s.vsq);
+        cpu.setMaterial(materialOf(s));
         cpu.setCpml(s.bx, s.ax, s.bz, s.az);
         GpuSolver gpu;
         std::string err;
         bool ok = gpu.init(s.W, s.H, s.nRec, s.nObs, err) && gpu.ensurePrograms(order, err);
         CHECK(ok, "GPU init order %d: %s", order, err.c_str());
         if (!ok) continue;
-        gpu.setVsq(s.vsq);
+        gpu.setMaterial(materialOf(s));
         gpu.setCpml(s.bx, s.ax, s.bz, s.az);
         gpu.setObs(s.obsX, s.obsY);
         const int perBatch = cs.scale < 2 ? 400 : 100;   // same physical time at 1 m
@@ -188,7 +197,7 @@ static void testPixels() {
     const size_t sismoSize = (size_t)(s.nRec * 2 + s.nObs) * kSismoStride;
     CpuSolver cpu;
     cpu.init(s.W, s.H, 4, sismoSize);
-    cpu.setVsq(s.vsq);
+    cpu.setMaterial(materialOf(s));
     cpu.setCpml(s.bx, s.ax, s.bz, s.az);
     auto st = makeSteps(s, 0, 300, 3000);
     BatchJob J = makeJob(s, st, 10);
@@ -221,7 +230,7 @@ static void testInstability(bool haveGpu) {
     J.probeRow = (int)st[0].sj0;
     CpuSolver cpu;
     cpu.init(s.W, s.H, 4, sismoSize);
-    cpu.setVsq(s.vsq);
+    cpu.setMaterial(materialOf(s));
     cpu.setCpml(s.bx, s.ax, s.bz, s.az);
     cpu.submit(J); cpu.wait();
     CHECK(cpu.instabilityDetected(), "CPU blow-up not detected");
@@ -237,7 +246,7 @@ static void testInstability(bool haveGpu) {
     GpuSolver gpu;
     std::string err;
     if (!gpu.init(s.W, s.H, s.nRec, s.nObs, err) || !gpu.ensurePrograms(10, err)) { CHECK(false, "GPU init: %s", err.c_str()); return; }
-    gpu.setVsq(s.vsq);
+    gpu.setMaterial(materialOf(s));
     gpu.setCpml(s.bx, s.ax, s.bz, s.az);
     gpu.setObs(s.obsX, s.obsY);
     gpu.submit(J, 0); gpu.wait();
@@ -354,7 +363,7 @@ static void testPipelineMatchesBarrier() {
         CpuSolver a, b;
         for (CpuSolver* c : {&a, &b}) {
             c->init(s.W, s.H, 6, sismoSize);
-            c->setVsq(s.vsq);
+            c->setMaterial(materialOf(s));
             c->setCpml(s.bx, s.ax, s.bz, s.az);
         }
         a.setPipelined(false);
@@ -555,6 +564,311 @@ static void testReceiverInterpolation() {
     }
 }
 
+// Variable density. A density step with no velocity step reflects with the same coefficient
+// at every angle, R = (rho2 - rho1) / (rho2 + rho1), so the trace above the interface must be
+// the direct wave plus R times the wave of the mirror source - which a homogeneous run gives
+// at the mirror image of the receiver. A uniform density of any value must leave P as it is.
+static void testDensity() {
+    std::printf("[density] uniform density leaves P unchanged; a density step reflects with R = (r2 - r1) / (r2 + r1)\n");
+    Setup s = makeSetup(1600, 1200, 2);
+    std::fill(s.vsq.begin(), s.vsq.end(), 0.0625f);                      // 1500 m/s everywhere
+    cpmlZ(s.H, 40, s.dt, s.oceanY, s.SCALE, false, s.bz, s.az);          // no free surface
+    const int is = s.W / 2, js = (int)std::lround(300.0 / s.SCALE);      // source 300 m below the top
+    const int jIf = js + (int)std::lround(150.0 / s.SCALE);              // density step 150 m below it
+    const int ir = is + (int)std::lround(200.0 / s.SCALE);               // receiver 200 m to the side
+    const int jImg = 2 * jIf - 1 - js;                                   // receiver mirrored in z = (jIf - 1/2) dh
+    const int nSteps = 1800;                                             // 0.3 s: past the reflection
+    auto run = [&](const std::vector<float>& rho, std::vector<double>& rec, std::vector<double>& img,
+                   std::vector<float>* field) {
+        CpuSolver cpu;
+        cpu.init(s.W, s.H, 4, (size_t)(s.nRec * 2 + s.nObs) * kSismoStride);
+        cpu.setMaterial(makeMaterial(s.vsq, rho, s.W, s.H));
+        cpu.setCpml(s.bx, s.ax, s.bz, s.az);
+        rec.clear(); img.clear();
+        for (int k = 0; k < nSteps; k += 1) {
+            auto st = makeSteps(s, k, 1, 1e9);
+            st[0].sj0 = (float)js; st[0].si0 = (float)is; st[0].rec_valid = 0;
+            BatchJob J = makeJob(s, st, 10);
+            J.freeSurface = false;
+            cpu.submit(J);
+            cpu.wait();
+            rec.push_back(cpu.P()[(size_t)js * s.W + ir]);
+            img.push_back(cpu.P()[(size_t)jImg * s.W + ir]);
+        }
+        if (field) *field = cpu.P();
+    };
+    const size_t N = (size_t)s.W * s.H;
+    std::vector<double> a, aImg, c, cImg, b, bImg;
+    std::vector<float> fa, fc;
+    run(std::vector<float>(N, 1.0f), a, aImg, &fa);
+    run(std::vector<float>(N, 2.5f), c, cImg, &fc);
+    double mx = 0, d = 0;
+    for (size_t i = 0; i < N; i++) { mx = std::max(mx, (double)std::fabs(fa[i])); d = std::max(d, (double)std::fabs(fa[i] - fc[i])); }
+    std::vector<float> rho(N, 1.0f);
+    const float r1 = 1.0f, r2 = 2.0f;
+    for (int j = jIf; j < s.H; j++) std::fill(rho.begin() + (size_t)j * s.W, rho.begin() + (size_t)(j + 1) * s.W, r2);
+    run(rho, b, bImg, nullptr);
+    // least-squares R from b - a = R * aImg
+    double num = 0, den = 0, peak = 0;
+    for (int k = 0; k < nSteps; k++) { num += (b[k] - a[k]) * aImg[k]; den += aImg[k] * aImg[k]; peak = std::max(peak, std::fabs(b[k])); }
+    const double R = num / den, Rth = (r2 - r1) / (r2 + r1);
+    double res = 0, refl = 0;
+    for (int k = 0; k < nSteps; k++) {
+        res = std::max(res, std::fabs(b[k] - a[k] - R * aImg[k]));
+        refl = std::max(refl, std::fabs(R * aImg[k]));
+    }
+    std::printf("  uniform rho 1 vs 2.5: max |P diff| %.2e of %.3g\n", d, mx);
+    std::printf("  density step 1 -> 2: R = %.4f (theory %.4f), misfit %.2f %% of the reflection\n", R, Rth, 100 * res / refl);
+    CHECK(d <= 1e-5 * mx, "a uniform density changes P (%.2e)", d / mx);
+    CHECK(std::fabs(R - Rth) < 0.01, "density reflection coefficient %.4f instead of %.4f", R, Rth);
+    CHECK(res < 0.05 * refl, "reflected wave does not match the mirror source (%.1f %%)", 100 * res / refl);
+}
+
+// ── Model files ─────────────────────────────────────────────────────────────
+namespace modeltest {
+void put16(std::vector<uint8_t>& b, size_t o, int v) { b[o] = (uint8_t)((v >> 8) & 0xFF); b[o + 1] = (uint8_t)(v & 0xFF); }
+void put32(std::vector<uint8_t>& b, size_t o, uint32_t v) {
+    b[o] = (uint8_t)(v >> 24); b[o + 1] = (uint8_t)(v >> 16); b[o + 2] = (uint8_t)(v >> 8); b[o + 3] = (uint8_t)v;
+}
+uint32_t toIbm(float f) {
+    if (f == 0.0f) return 0;
+    uint32_t sign = f < 0 ? 0x80000000u : 0;
+    double a = std::fabs((double)f);
+    int ex = 64;
+    while (a >= 1.0) { a /= 16.0; ex++; }
+    while (a < 1.0 / 16.0) { a *= 16.0; ex--; }
+    return sign | (uint32_t)ex << 24 | (uint32_t)std::lround(a * 16777216.0);
+}
+// The FWI program's layout: one trace per column, interval = dz * 1000, source X = x (scalar -10)
+std::vector<uint8_t> segyModel(const GridModel& m, int format) {
+    const size_t TB = 240 + (size_t)m.nz * 4;
+    std::vector<uint8_t> b(3600 + (size_t)m.nx * TB, 0);
+    put16(b, 3216, (int)std::lround(m.dz * 1000));
+    put16(b, 3220, m.nz);
+    put16(b, 3224, format);
+    for (int ix = 0; ix < m.nx; ix++) {
+        const size_t t = 3600 + (size_t)ix * TB;
+        put16(b, t + 70, -10);
+        put32(b, t + 72, (uint32_t)(int32_t)std::lround(ix * m.dx * 10));
+        put16(b, t + 114, m.nz);
+        for (int iz = 0; iz < m.nz; iz++) {
+            const float v = m.at(ix, iz);
+            uint32_t bits;
+            if (format == 1) bits = toIbm(v); else std::memcpy(&bits, &v, 4);
+            put32(b, t + 240 + (size_t)iz * 4, bits);
+        }
+    }
+    return b;
+}
+void writeBytes(const std::filesystem::path& p, const void* d, size_t n) {
+    std::ofstream f(p, std::ios::binary);
+    f.write((const char*)d, (std::streamsize)n);
+}
+double maxDiff(const GridModel& a, const GridModel& b) {
+    if (a.nx != b.nx || a.nz != b.nz) return 1e30;
+    double d = 0;
+    for (size_t i = 0; i < a.v.size(); i++) d = std::max(d, (double)std::fabs(a.v[i] - b.v[i]));
+    return d;
+}
+} // namespace modeltest
+
+static void testModelImport() {
+    using namespace modeltest;
+    std::printf("[model import] SEG-Y / raw / CSV velocity models, units, loading into the simulation\n");
+    // 2 km x 600 m: water down to 200 m on the left, 120 m on the right, then 1800 m/s + gradient
+    GridModel m;
+    m.nx = 101; m.nz = 61; m.dx = 20; m.dz = 10;
+    m.v.resize((size_t)m.nx * m.nz);
+    auto seafloor = [&](double x) { return 200.0 - 80.0 * x / 2000.0; };
+    for (int ix = 0; ix < m.nx; ix++)
+        for (int iz = 0; iz < m.nz; iz++) {
+            const double x = ix * m.dx, z = iz * m.dz;
+            m.v[(size_t)ix * m.nz + iz] = z < seafloor(x) ? 1500.0f : (float)(1800.0 + 1.5 * (z - seafloor(x)));
+        }
+    const auto dir = std::filesystem::temp_directory_path() / "fdtd_model_test";
+    std::filesystem::create_directories(dir);
+    auto u8 = [](const std::filesystem::path& p) { const std::u8string s = p.u8string(); return std::string(s.begin(), s.end()); };
+    std::string err;
+
+    for (int fmt : {5, 1}) {   // IEEE and IBM floats
+        auto bytes = segyModel(m, fmt);
+        const auto p = dir / (fmt == 5 ? "vel_ieee.sgy" : "vel_ibm.sgy");
+        writeBytes(p, bytes.data(), bytes.size());
+        SegyModelInfo info;
+        const bool ok = probeSegyModel(u8(p), info, err);
+        CHECK(ok, "SEG-Y probe (format %d): %s", fmt, err.c_str());
+        GridModel r;
+        const bool ok2 = ok && readSegyModel(u8(p), info.dx, info.dz, r, err);
+        CHECK(ok2, "SEG-Y read (format %d): %s", fmt, err.c_str());
+        const double d = ok2 ? maxDiff(m, r) : 1e30;
+        std::printf("  SEG-Y format %d: %dx%d dx=%g dz=%g  max diff %.3g m/s\n", fmt, info.nx, info.nz, info.dx, info.dz, d);
+        CHECK(info.nx == m.nx && info.nz == m.nz && info.dx == m.dx && info.dz == m.dz, "SEG-Y header (format %d)", fmt);
+        CHECK(d < (fmt == 1 ? 1e-3 : 1e-6), "SEG-Y values (format %d): %.3g", fmt, d);
+    }
+    {   // raw float32, both orders
+        std::vector<float> colOrder = m.v, rowOrder(m.v.size());
+        for (int ix = 0; ix < m.nx; ix++)
+            for (int iz = 0; iz < m.nz; iz++) rowOrder[(size_t)iz * m.nx + ix] = m.at(ix, iz);
+        writeBytes(dir / "vel_col.bin", colOrder.data(), colOrder.size() * 4);
+        writeBytes(dir / "vel_row.bin", rowOrder.data(), rowOrder.size() * 4);
+        GridModel a, b;
+        const bool okA = readRawModel(u8(dir / "vel_col.bin"), m.nx, m.nz, m.dx, m.dz, false, false, a, err);
+        const bool okB = readRawModel(u8(dir / "vel_row.bin"), m.nx, m.nz, m.dx, m.dz, true, false, b, err);
+        CHECK(okA && okB, "raw read: %s", err.c_str());
+        std::printf("  raw float32: column order diff %.3g, row order diff %.3g\n", maxDiff(m, a), maxDiff(m, b));
+        CHECK(maxDiff(m, a) == 0 && maxDiff(m, b) == 0, "raw values");
+        GridModel bad;
+        CHECK(!readRawModel(u8(dir / "vel_col.bin"), m.nx + 1, m.nz, m.dx, m.dz, false, false, bad, err), "raw size mismatch accepted");
+    }
+    {   // CSV in km/s with ';' and a decimal comma, plus a title row
+        std::ofstream f(dir / "vel.csv", std::ios::binary);
+        f << "# velocity model\n";
+        for (int ix = 0; ix < m.nx; ix++) f << (ix ? ";" : "") << "x" << ix;
+        f << "\n";
+        char b[32];
+        for (int iz = 0; iz < m.nz; iz++) {
+            for (int ix = 0; ix < m.nx; ix++) {
+                std::snprintf(b, sizeof(b), "%.4f", m.at(ix, iz) / 1000.0);
+                std::string t = b;
+                std::replace(t.begin(), t.end(), '.', ',');
+                f << (ix ? ";" : "") << t;
+            }
+            f << "\r\n";
+        }
+        f.close();
+        int nx = 0, nz = 0;
+        const bool okP = probeAsciiModel(u8(dir / "vel.csv"), nx, nz, err);
+        GridModel a;
+        const bool ok = okP && readAsciiModel(u8(dir / "vel.csv"), m.dx, m.dz, a, err);
+        CHECK(ok, "CSV read: %s", err.c_str());
+        std::string note;
+        const bool okU = ok && normalizeModelUnits(a, ModelQuantity::Velocity, note, err);
+        CHECK(okU, "CSV units: %s", err.c_str());
+        std::printf("  CSV (km/s, ';', decimal comma): %dx%d  max diff %.3g m/s  note: %s\n", nx, nz, okU ? maxDiff(m, a) : -1.0, note.c_str());
+        CHECK(nx == m.nx && nz == m.nz && okU && maxDiff(m, a) < 0.01, "CSV values");
+    }
+    {   // load into the simulation (CPU only): domain, grid velocity, Gardner density, seafloor / OBS
+        Simulation sim;
+        sim.p.dh = 4;
+        sim.OCEAN_Y = sim.p.domain_H * 0.166;
+        sim.init(false);
+        GridModel vel = m;
+        const bool ok = sim.loadModel(vel, GridModel{}, err);
+        CHECK(ok, "loadModel: %s", err.c_str());
+        if (ok) {
+            const double W = sim.p.domain_W, D = sim.p.domain_H - sim.OCEAN_Y;
+            // grid node at x = 1000 m, 300 m below the sea surface
+            const int i = (int)std::lround(1000.0 / sim.SCALE), j = (int)std::lround((sim.OCEAN_Y + 300.0) / sim.SCALE);
+            const double zNode = j * sim.SCALE - sim.OCEAN_Y;
+            const double vGrid = std::sqrt(sim.vsq[(size_t)j * sim.W_sim + i]) * 6000.0;
+            const double vTrue = 1800.0 + 1.5 * (zNode - seafloor(i * sim.SCALE));
+            const double rGrid = sim.rho[(size_t)j * sim.W_sim + i], rTrue = 0.31 * std::pow(vTrue, 0.25);
+            const double rWater = sim.rho[(size_t)(sim.sjSurf() + 5) * sim.W_sim + i];
+            const double sf = sim.seafloorDepth(1000.0) - sim.OCEAN_Y;
+            std::printf("  loaded: domain %.0f m x %.0f m below the surface, v(1000, %.0f) = %.1f (model %.1f) m/s, "
+                        "rho %.4f (Gardner %.4f), water rho %.2f, seafloor at x=1000: %.1f m (model %.1f)\n",
+                        W, D, zNode, vGrid, vTrue, rGrid, rTrue, rWater, sf, seafloor(1000.0));
+            CHECK(std::fabs(W - 2000) < 1e-3 && std::fabs(D - 600) < 0.5, "domain size %.1f x %.1f", W, D);
+            CHECK(std::fabs(vGrid - vTrue) < 1.0, "grid velocity %.2f vs %.2f", vGrid, vTrue);
+            CHECK(std::fabs(rGrid - rTrue) < 1e-3 && std::fabs(rWater - 1.03) < 1e-6, "Gardner density");
+            // the model only knows the seafloor to within its sample interval dz
+            CHECK(std::fabs(sf - seafloor(1000.0)) <= m.dz, "seafloor from the model %.1f vs %.1f", sf, seafloor(1000.0));
+            sim.clearModel();
+            CHECK(!sim.hasModel() && sim.p.geology == GeologyModel::Flat, "clearModel");
+        }
+    }
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
+// Line simulation: one SEG-Y per receiver type holding every shot (FFID, source X, traces),
+// and each shot independent of the ones before it (same traces as a line of that one shot).
+namespace linetest {
+int32_t be32(const std::vector<uint8_t>& b, size_t o) {
+    return (int32_t)((uint32_t)b[o] << 24 | (uint32_t)b[o + 1] << 16 | (uint32_t)b[o + 2] << 8 | b[o + 3]);
+}
+int be16(const std::vector<uint8_t>& b, size_t o) { return (int16_t)(b[o] << 8 | b[o + 1]); }
+float bef(const std::vector<uint8_t>& b, size_t o) { uint32_t u = (uint32_t)be32(b, o); float f; std::memcpy(&f, &u, 4); return f; }
+std::vector<uint8_t> readFile(const std::filesystem::path& p) {
+    std::ifstream f(p, std::ios::binary);
+    return std::vector<uint8_t>((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+}
+// Runs a line on the CPU; returns the line folder ("" on failure)
+std::string runLine(double firstX, int n, double interval, const std::filesystem::path& root, std::string& alert) {
+    Simulation sim;
+    sim.p.sismo_ms = 300;
+    sim.OCEAN_Y = sim.p.domain_H * 0.166;
+    sim.init(false);
+    Simulation::LineSettings ls;
+    ls.firstX = firstX; ls.nShots = n; ls.interval = interval;
+    const std::u8string u = root.u8string();
+    ls.folder.assign(u.begin(), u.end());
+    std::string err;
+    if (!sim.startLine(ls, err)) { alert = err; return ""; }
+    double now = 0;
+    const auto t0 = std::chrono::steady_clock::now();   // wall clock: update() returns at once while a batch runs
+    while (sim.lineActive() && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(120)) {
+        now += 1.0 / 60;
+        sim.update(now, 1.0 / 60);
+        std::this_thread::yield();
+    }
+    alert = !sim.notices.empty() ? sim.notices.back() : sim.alerts.empty() ? "" : sim.alerts.back();
+    return sim.lineActive() ? "" : sim.lineFolder();
+}
+} // namespace linetest
+
+static void testLineExport() {
+    using namespace linetest;
+    std::printf("[line] every shot of a line into line_streamer.segy / line_obs.segy\n");
+    const auto root = std::filesystem::temp_directory_path() / "fdtd_line_test";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    std::filesystem::create_directories(root);
+    std::string alert;
+    const std::string dir3 = runLine(500, 3, 50, root / "a", alert);
+    CHECK(!dir3.empty(), "line did not finish: %s", alert.c_str());
+    if (dir3.empty()) return;
+    CHECK(alert.find("tamamland") != std::string::npos, "unexpected final message: %s", alert.c_str());
+    const auto st = readFile(std::filesystem::u8path(dir3) / "line_streamer.segy");
+    const auto ob = readFile(std::filesystem::u8path(dir3) / "line_obs.segy");
+    CHECK(st.size() > 3600 && ob.size() > 3600, "line files missing or empty");
+    if (st.size() <= 3600 || ob.size() <= 3600) return;
+    const int ns = be16(st, 3220), dtUs = be16(st, 3216);
+    const size_t TB = 240 + (size_t)ns * 4;
+    const size_t nTr = (st.size() - 3600) / TB, nObsTr = (ob.size() - 3600) / TB;
+    const int nRec = be16(st, 3212);   // traces per ensemble
+    int ffidOk = 0, sxOk = 0, seqOk = 0;
+    for (size_t t = 0; t < nTr; t++) {
+        const size_t h = 3600 + t * TB;
+        const int shot = (int)(t / nRec);
+        ffidOk += be32(st, h + 8) == shot + 1;
+        sxOk += be32(st, h + 72) == (int32_t)std::lround(500 + 50.0 * shot);
+        seqOk += be32(st, h + 0) == (int32_t)(t + 1);
+    }
+    std::printf("  streamer: %zu traces (%d per shot), %d samples at %d us; OBS: %zu traces\n", nTr, nRec, ns, dtUs, nObsTr);
+    CHECK(nTr == (size_t)3 * nRec && (st.size() - 3600) % TB == 0, "streamer trace count %zu", nTr);
+    CHECK(nObsTr > 0 && nObsTr % 3 == 0, "OBS trace count %zu", nObsTr);
+    CHECK(ns == 300 && dtUs == 1000, "samples %d / interval %d", ns, dtUs);
+    CHECK(ffidOk == (int)nTr && sxOk == (int)nTr && seqOk == (int)nTr, "headers: FFID %d, source X %d, sequence %d of %zu",
+          ffidOk, sxOk, seqOk, nTr);
+    // shot 2 of the line == a line of only that shot
+    const std::string dir1 = runLine(550, 1, 50, root / "b", alert);
+    CHECK(!dir1.empty(), "single-shot line did not finish: %s", alert.c_str());
+    if (dir1.empty()) return;
+    const auto one = readFile(std::filesystem::u8path(dir1) / "line_streamer.segy");
+    double mx = 0, d = 0;
+    for (int i = 0; i < nRec && one.size() >= 3600 + (size_t)nRec * TB; i++)
+        for (int k = 0; k < ns; k++) {
+            const float a = bef(st, 3600 + ((size_t)nRec + i) * TB + 240 + (size_t)k * 4);
+            const float b = bef(one, 3600 + (size_t)i * TB + 240 + (size_t)k * 4);
+            mx = std::max(mx, (double)std::fabs(b));
+            d = std::max(d, (double)std::fabs(a - b));
+        }
+    std::printf("  shot 2 of the line vs the same shot alone: max |diff| %.3g of %.3g\n", d, mx);
+    CHECK(mx > 0 && d <= 1e-6 * mx, "shot 2 depends on shot 1 (%.3g of %.3g)", d, mx);
+    std::filesystem::remove_all(root, ec);
+}
+
 static void testSegy() {
     std::printf("[segy] Rev1 layout\n");
     std::vector<float> tr(3 * 100);
@@ -626,7 +940,7 @@ static void bench(bool haveGpu) {
             if (std::getenv("FDTD_THREAD_SWEEP") == nullptr) break;
             CpuSolver cpu;
             cpu.init(s.W, s.H, thr, sismoSize);
-            cpu.setVsq(s.vsq);
+            cpu.setMaterial(materialOf(s));
             cpu.setCpml(s.bx, s.ax, s.bz, s.az);
             cpu.submit(J); cpu.wait();
             auto t0 = std::chrono::steady_clock::now();
@@ -638,7 +952,7 @@ static void bench(bool haveGpu) {
             CpuSolver cpu;
             int hc = (int)std::thread::hardware_concurrency();
             cpu.init(s.W, s.H, hc, sismoSize);
-            cpu.setVsq(s.vsq);
+            cpu.setMaterial(materialOf(s));
             cpu.setCpml(s.bx, s.ax, s.bz, s.az);
             cpu.submit(J); cpu.wait();   // warm-up
             auto t0 = std::chrono::steady_clock::now();
@@ -654,7 +968,7 @@ static void bench(bool haveGpu) {
                 std::printf("  %-28s GPU: %s\n", c.name, err.c_str());
                 continue;
             }
-            gpu.setVsq(s.vsq);
+            gpu.setMaterial(materialOf(s));
             gpu.setCpml(s.bx, s.ax, s.bz, s.az);
             gpu.setObs(s.obsX, s.obsY);
             gpu.submit(J, 0); gpu.wait();
@@ -689,12 +1003,12 @@ static void snapshots(const std::string& dir, bool haveGpu) {
     const size_t sismoSize = (size_t)(s.nRec * 2 + s.nObs) * kSismoStride;
     CpuSolver cpu;
     cpu.init(s.W, s.H, 4, sismoSize);
-    cpu.setVsq(s.vsq);
+    cpu.setMaterial(materialOf(s));
     cpu.setCpml(s.bx, s.ax, s.bz, s.az);
     GpuSolver gpu;
     std::string err;
     const bool g = haveGpu && gpu.init(s.W, s.H, s.nRec, s.nObs, err) && gpu.ensurePrograms(10, err);
-    if (g) { gpu.setVsq(s.vsq); gpu.setCpml(s.bx, s.ax, s.bz, s.az); gpu.setObs(s.obsX, s.obsY); }
+    if (g) { gpu.setMaterial(materialOf(s)); gpu.setCpml(s.bx, s.ax, s.bz, s.az); gpu.setObs(s.obsX, s.obsY); }
     int done = 0;
     for (int target : {150, 300, 600, 1200, 2400}) {
         auto st = makeSteps(s, done, target - done, 12000);
@@ -769,7 +1083,7 @@ static void pmlCheck() {
         const size_t sismoSize = (size_t)(s.nRec * 2 + s.nObs) * kSismoStride;
         CpuSolver cpu;
         cpu.init(s.W, s.H, 4, sismoSize);
-        cpu.setVsq(s.vsq);
+        cpu.setMaterial(materialOf(s));
         cpu.setCpml(s.bx, s.ax, s.bz, s.az);
         const int cross = (int)(260 / (v * s.dt));   // steps to travel 260 cells (well past every boundary)
         double peak = 0, late = 0;
@@ -801,7 +1115,7 @@ static double radiatedPulse(Wavelet w, const char* dumpPath = nullptr, double* p
     cpmlZ(s.H, 40, s.dt, s.oceanY, s.SCALE, false, s.bz, s.az);
     CpuSolver cpu;
     cpu.init(s.W, s.H, 4, (size_t)(s.nRec * 2 + s.nObs) * kSismoStride);
-    cpu.setVsq(s.vsq);
+    cpu.setMaterial(materialOf(s));
     cpu.setCpml(s.bx, s.ax, s.bz, s.az);
     const double f = 50, dtp = s.SCALE / 6000.0 * s.dt;
     SourcePulse pulse;
@@ -962,6 +1276,9 @@ int main(int argc, char** argv) {
     testPipelineMatchesBarrier();
     testSourceWaveletController();
     testReceiverInterpolation();
+    testDensity();
+    testModelImport();
+    testLineExport();
     testSegy();
     testJson();
     if (doBench) bench(haveGpu);

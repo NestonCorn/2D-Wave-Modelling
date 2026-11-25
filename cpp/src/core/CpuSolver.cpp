@@ -64,6 +64,7 @@ inline void rowRange(int lo, int hi, int t, int n, int& r0, int& r1) {
 template <int ORD, bool PX, bool PZ>
 FDTD_INLINE void velocitySeg(int i0, int i1, int W, float dt, const float* __restrict P, float* __restrict Vx,
                              float* __restrict Vz, float* __restrict pvx, float* __restrict pvz,
+                             const float* __restrict ux, const float* __restrict uz,
                              const float* __restrict bx, const float* __restrict ax, float bzj, float azj) {
     constexpr int H2 = ORD / 2;
     constexpr const float* c = Coef<ORD>::c;
@@ -92,8 +93,9 @@ FDTD_INLINE void velocitySeg(int i0, int i1, int W, float dt, const float* __res
             _mm256_storeu_ps(pvz + i, pz);
             sDz = _mm256_add_ps(sDz, pz);
         }
-        _mm256_storeu_ps(Vx + i, _mm256_fnmadd_ps(vdt, sDx, _mm256_loadu_ps(Vx + i)));
-        _mm256_storeu_ps(Vz + i, _mm256_fnmadd_ps(vdt, sDz, _mm256_loadu_ps(Vz + i)));
+        // buoyancy (1 / rho) at the velocity nodes
+        _mm256_storeu_ps(Vx + i, _mm256_fnmadd_ps(_mm256_mul_ps(vdt, _mm256_loadu_ps(ux + i)), sDx, _mm256_loadu_ps(Vx + i)));
+        _mm256_storeu_ps(Vz + i, _mm256_fnmadd_ps(_mm256_mul_ps(vdt, _mm256_loadu_ps(uz + i)), sDz, _mm256_loadu_ps(Vz + i)));
     }
     for (; i < i1; i++) {   // tail
         const float* p = P + i;
@@ -105,15 +107,15 @@ FDTD_INLINE void velocitySeg(int i0, int i1, int W, float dt, const float* __res
         }
         if constexpr (PX) { const float px = bx[i] * pvx[i] + ax[i] * dPx; pvx[i] = px; sDx += px; }
         if constexpr (PZ) { const float pz = bzj * pvz[i] + azj * dPz; pvz[i] = pz; sDz += pz; }
-        Vx[i] -= dt * sDx;
-        Vz[i] -= dt * sDz;
+        Vx[i] -= dt * ux[i] * sDx;
+        Vz[i] -= dt * uz[i] * sDz;
     }
 }
 
 // ── Phase 2: pressure update on one row segment ──
 template <int ORD, bool PX, bool PZ>
 FDTD_INLINE void pressureSeg(int i0, int i1, int W, float dt, float* __restrict P, const float* __restrict Vx,
-                             const float* __restrict Vz, const float* __restrict vsq, float* __restrict ppx,
+                             const float* __restrict Vz, const float* __restrict kmod, float* __restrict ppx,
                              float* __restrict ppz, const float* __restrict bx, const float* __restrict ax, float bzj,
                              float azj) {
     constexpr int H2 = ORD / 2;
@@ -144,7 +146,7 @@ FDTD_INLINE void pressureSeg(int i0, int i1, int W, float dt, float* __restrict 
             _mm256_storeu_ps(ppz + i, pz);
             sum = _mm256_add_ps(sum, pz);
         }
-        const __m256 k2 = _mm256_mul_ps(vdt, _mm256_loadu_ps(vsq + i));
+        const __m256 k2 = _mm256_mul_ps(vdt, _mm256_loadu_ps(kmod + i));   // K = rho v^2
         _mm256_storeu_ps(P + i, _mm256_fnmadd_ps(k2, sum, _mm256_loadu_ps(P + i)));
     }
     for (; i < i1; i++) {   // tail
@@ -159,7 +161,7 @@ FDTD_INLINE void pressureSeg(int i0, int i1, int W, float dt, float* __restrict 
         float sum = dVx + dVz;
         if constexpr (PX) { const float px = bx[i] * ppx[i] + ax[i] * dVx1; ppx[i] = px; sum += px; }
         if constexpr (PZ) { const float pz = bzj * ppz[i] + azj * dVz1; ppz[i] = pz; sum += pz; }
-        P[i] -= dt * vsq[i] * sum;
+        P[i] -= dt * kmod[i] * sum;
     }
 }
 
@@ -177,7 +179,7 @@ FDTD_INLINE void forSegments(int is, int ie, int xi0, int xi1, F&& seg) {
 // ── Phase 1: velocity update with CPML (rows [j0, j1)) ──────────────────────
 template <int ORD>
 void velocityRows(int j0, int j1, int bx0, int bx1, int W, int H, float dt, int xi0, int xi1,
-                  const float* P, float* Vx, float* Vz, float* psiVx, float* psiVz,
+                  const float* P, float* Vx, float* Vz, float* psiVx, float* psiVz, const float* buoyX, const float* buoyZ,
                   const float* bx, const float* ax, const float* bz, const float* az) {
     constexpr int H2 = ORD / 2;
     const int js = std::max(H2 - 1, j0), je = std::min(j1, H - H2);
@@ -188,13 +190,14 @@ void velocityRows(int j0, int j1, int bx0, int bx1, int W, int H, float dt, int 
         const bool pz = azj != 0.0f;
         const float* Pr = P + row;
         float *vx = Vx + row, *vz = Vz + row, *pvx = psiVx + row, *pvz = psiVz + row;
+        const float *ux = buoyX + row, *uz = buoyZ + row;
         forSegments(is, ie, xi0, xi1, [&](int i0, int i1, bool px) {
             if (px) {
-                if (pz) velocitySeg<ORD, true, true>(i0, i1, W, dt, Pr, vx, vz, pvx, pvz, bx, ax, bzj, azj);
-                else    velocitySeg<ORD, true, false>(i0, i1, W, dt, Pr, vx, vz, pvx, pvz, bx, ax, bzj, azj);
+                if (pz) velocitySeg<ORD, true, true>(i0, i1, W, dt, Pr, vx, vz, pvx, pvz, ux, uz, bx, ax, bzj, azj);
+                else    velocitySeg<ORD, true, false>(i0, i1, W, dt, Pr, vx, vz, pvx, pvz, ux, uz, bx, ax, bzj, azj);
             } else {
-                if (pz) velocitySeg<ORD, false, true>(i0, i1, W, dt, Pr, vx, vz, pvx, pvz, bx, ax, bzj, azj);
-                else    velocitySeg<ORD, false, false>(i0, i1, W, dt, Pr, vx, vz, pvx, pvz, bx, ax, bzj, azj);
+                if (pz) velocitySeg<ORD, false, true>(i0, i1, W, dt, Pr, vx, vz, pvx, pvz, ux, uz, bx, ax, bzj, azj);
+                else    velocitySeg<ORD, false, false>(i0, i1, W, dt, Pr, vx, vz, pvx, pvz, ux, uz, bx, ax, bzj, azj);
             }
         });
     }
@@ -203,7 +206,7 @@ void velocityRows(int j0, int j1, int bx0, int bx1, int W, int H, float dt, int 
 // ── Phase 2: pressure update with CPML (rows [j0, j1)) ──────────────────────
 template <int ORD>
 void pressureRows(int j0, int j1, int bx0, int bx1, int W, int H, float dt, int xi0, int xi1,
-                  float* P, const float* Vx, const float* Vz, const float* Vsq, float* psiPx, float* psiPz,
+                  float* P, const float* Vx, const float* Vz, const float* Kmod, float* psiPx, float* psiPz,
                   const float* bx, const float* ax, const float* bz, const float* az) {
     constexpr int H2 = ORD / 2;
     const int js = std::max(H2, j0), je = std::min(j1, H - H2);
@@ -213,7 +216,7 @@ void pressureRows(int j0, int j1, int bx0, int bx1, int W, int H, float dt, int 
         const float bzj = bz[j], azj = az[j];
         const bool pz = azj != 0.0f;
         float* Pr = P + row;
-        const float *vx = Vx + row, *vz = Vz + row, *vs = Vsq + row;
+        const float *vx = Vx + row, *vz = Vz + row, *vs = Kmod + row;
         float *ppx = psiPx + row, *ppz = psiPz + row;
         forSegments(is, ie, xi0, xi1, [&](int i0, int i1, bool px) {
             if (px) {
@@ -257,7 +260,8 @@ void CpuSolver::init(int W, int H, int nThreads, size_t sismoSize) {
     }
     W_ = W; H_ = H;
     const size_t N = (size_t)W * H;
-    for (auto* v : {&P_, &Vx_, &Vz_, &Vsq_, &psiVx_, &psiVz_, &psiPx_, &psiPz_}) v->assign(N, 0.0f);
+    for (auto* v : {&P_, &Vx_, &Vz_, &psiVx_, &psiVz_, &psiPx_, &psiPz_}) v->assign(N, 0.0f);
+    K_.assign(N, 0.0f); buoyX_.assign(N, 1.0f); buoyZ_.assign(N, 1.0f);
     pixels_.assign(N, 0u);
     sismo_.assign(sismoSize, 0.0f);
     bx_.assign(W, 1.0f); ax_.assign(W, 0.0f); bz_.assign(H, 1.0f); az_.assign(H, 0.0f);
@@ -265,7 +269,7 @@ void CpuSolver::init(int W, int H, int nThreads, size_t sismoSize) {
     unstable_ = false;
 }
 
-void CpuSolver::setVsq(const std::vector<float>& vsq) { wait(); Vsq_ = vsq; }
+void CpuSolver::setMaterial(const Material& m) { wait(); K_ = m.K; buoyX_ = m.buoyX; buoyZ_ = m.buoyZ; }
 
 void CpuSolver::setCpml(const std::vector<float>& bx, const std::vector<float>& ax,
                         const std::vector<float>& bz, const std::vector<float>& az) {
@@ -382,12 +386,12 @@ void CpuSolver::runJob(int t) {
     for (int s = 0; s < J.steps; s++) {
         auto t0 = Clock::now();
         velocityRows<ORD>(r0, r1, bx0, bx1, W, H, J.dt, xi0_, xi1_, P_.data(), Vx_.data(), Vz_.data(),
-                          psiVx_.data(), psiVz_.data(), bx_.data(), ax_.data(), bz_.data(), az_.data());
+                          psiVx_.data(), psiVz_.data(), buoyX_.data(), buoyZ_.data(), bx_.data(), ax_.data(), bz_.data(), az_.data());
         auto t1 = Clock::now();
         barrier_->arrive_and_wait();
         auto t2 = Clock::now();
 
-        pressureRows<ORD>(r0, r1, bx0, bx1, W, H, J.dt, xi0_, xi1_, P_.data(), Vx_.data(), Vz_.data(), Vsq_.data(),
+        pressureRows<ORD>(r0, r1, bx0, bx1, W, H, J.dt, xi0_, xi1_, P_.data(), Vx_.data(), Vz_.data(), K_.data(),
                           psiPx_.data(), psiPz_.data(), bx_.data(), ax_.data(), bz_.data(), az_.data());
         // Dirichlet free surface (P = 0 above and at the sea surface), distributed by rows
         for (int j = r0; j < fs1; j++) {
@@ -457,11 +461,11 @@ void CpuSolver::runPipelined(int t) {
             const int q1 = std::min(y1, q0 + kPipeRows);
             waitFor(s, q1 >= y1 ? H : q1 + H2);
             velocityRows<ORD>(q0, q1, bx0, bx1, W, H, J.dt, xi0_, xi1_, P_.data(), Vx_.data(), Vz_.data(),
-                              psiVx_.data(), psiVz_.data(), bx_.data(), ax_.data(), bz_.data(), az_.data());
+                              psiVx_.data(), psiVz_.data(), buoyX_.data(), buoyZ_.data(), bx_.data(), ax_.data(), bz_.data(), az_.data());
             const int pEnd = q1 >= y1 ? y1 : std::max(front, q1 - H2 + 1);
             if (pEnd > front) {
                 pressureRows<ORD>(front, pEnd, bx0, bx1, W, H, J.dt, xi0_, xi1_, P_.data(), Vx_.data(), Vz_.data(),
-                                  Vsq_.data(), psiPx_.data(), psiPz_.data(), bx_.data(), ax_.data(), bz_.data(), az_.data());
+                                  K_.data(), psiPx_.data(), psiPz_.data(), bx_.data(), ax_.data(), bz_.data(), az_.data());
                 for (int j = front; j < std::min(pEnd, fsEnd); j++) {   // Dirichlet free surface
                     float* row = P_.data() + (size_t)j * W;
                     std::fill(row + fsx0, row + fsx1 + 1, 0.0f);

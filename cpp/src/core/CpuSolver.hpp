@@ -6,6 +6,7 @@
 #include <mutex>
 #include <thread>
 #include <vector>
+#include "Material.hpp"
 #include "SolverTypes.hpp"
 
 // Multi-threaded CPU FDTD engine (port of worker.js).
@@ -23,7 +24,7 @@ public:
     int width() const { return W_; }
     int height() const { return H_; }
 
-    void setVsq(const std::vector<float>& vsq);
+    void setMaterial(const Material& m);   // K = rho v^2, buoyancy at the Vx / Vz nodes
     void setCpml(const std::vector<float>& bx, const std::vector<float>& ax,
                  const std::vector<float>& bz, const std::vector<float>& az);
     void setCpmlZ(const std::vector<float>& bz, const std::vector<float>& az);
@@ -60,7 +61,7 @@ private:
     void pixelPhase(int t);
 
     int W_ = 0, H_ = 0, nThreads_ = 0;
-    std::vector<float> P_, Vx_, Vz_, Vsq_, psiVx_, psiVz_, psiPx_, psiPz_;
+    std::vector<float> P_, Vx_, Vz_, K_, buoyX_, buoyZ_, psiVx_, psiVz_, psiPx_, psiPz_;
     std::vector<float> bx_, ax_, bz_, az_;
     int xi0_ = 0, xi1_ = -1;   // contiguous columns with ax == 0 (no x-CPML)
     std::vector<float> sismo_;

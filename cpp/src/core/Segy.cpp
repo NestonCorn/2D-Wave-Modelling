@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <charconv>
 #include <cstring>
+#include <cstdio>
 #include <ctime>
+#include <filesystem>
 
 namespace {
 
@@ -75,19 +77,14 @@ std::vector<float> resampleGather(const float* sismo, size_t offset, int nTraces
     return out;
 }
 
-std::vector<uint8_t> buildSegy(const SegySpec& S) {
-    const int TH = 240;
-    const size_t SB = (size_t)S.nSamples * 4;
-    const size_t total = 3200 + 400 + (size_t)S.nTraces * (TH + SB);
-    std::vector<uint8_t> buf(total, 0);
-    BE dv{buf.data()};
+namespace {
 
-    // ── Textual File Header (3200 bytes, 40 lines × 80 chars EBCDIC) ──
+std::vector<std::string> textLines(const SegySpec& S, const std::string& shotLine) {
     std::string now = utcNow("%Y-%m-%d %H:%M:%S");
     char tmp[128];
     std::vector<std::string> lines;
     lines.push_back("C 1 SEG-Y REV1 - SLO/CLO ACOUSTIC FDTD SIMULATOR");
-    lines.push_back("C 2 SHOT NUMBER: " + std::to_string(S.shotNum) + "  TYPE: " + S.label);
+    lines.push_back(shotLine);
     lines.push_back("C 3 MODE: " + S.modeLabel + "  DATE: " + now);
     lines.push_back("C 4 SOURCE X: " + jsNum(S.sourceX) + "m  SOURCE Y: " + jsNum(S.sourceY) + "m");
     lines.push_back("C 5 SOURCE DEPTH BHD: " + jsNum(S.sourceDepth) + "m");
@@ -102,6 +99,12 @@ std::vector<uint8_t> buildSegy(const SegySpec& S) {
     lines.push_back("C13 GEOLOGY MODEL: " + S.geology);
     for (int i = 0; i < 26; i++) lines.push_back("C" + std::to_string(i + 14));
     lines.push_back("C40 END TEXTUAL HEADER");
+    return lines;
+}
+
+// Textual (3200 bytes EBCDIC) + binary (400 bytes) file header
+void writeFileHeader(uint8_t* buf, const SegySpec& S, const std::vector<std::string>& lines, int jobId) {
+    BE dv{buf};
     for (int ln = 0; ln < 40; ln++) {
         std::string text = ln < (int)lines.size() ? lines[ln] : "";
         text.resize(80, ' ');
@@ -110,15 +113,13 @@ std::vector<uint8_t> buildSegy(const SegySpec& S) {
             buf[ln * 80 + c] = ch < 128 ? A2E[ch] : 0x40;
         }
     }
-
-    // ── Binary File Header (400 bytes @ 3200) ──
     const size_t bh = 3200;
-    dv.i32(bh + 0, S.shotNum);      // Job ID
-    dv.i32(bh + 4, S.shotNum);      // Line number
-    dv.i32(bh + 8, S.shotNum);      // Reel number
+    dv.i32(bh + 0, jobId);          // Job ID
+    dv.i32(bh + 4, jobId);          // Line number
+    dv.i32(bh + 8, jobId);          // Reel number
     dv.i16(bh + 12, S.nTraces);     // Traces per ensemble
     dv.i16(bh + 14, 0);             // Aux traces
-    dv.i16(bh + 16, S.dtMicros);    // Sample interval (μs)
+    dv.i16(bh + 16, S.dtMicros);    // Sample interval (us)
     dv.i16(bh + 18, S.dtMicros);
     dv.i16(bh + 20, S.nSamples);    // Samples per trace
     dv.i16(bh + 22, S.nSamples);
@@ -129,44 +130,85 @@ std::vector<uint8_t> buildSegy(const SegySpec& S) {
     dv.u16(bh + 300, 0x0100);       // SEG-Y Rev 1.0
     dv.u16(bh + 302, 1);            // Fixed length traces
     dv.u16(bh + 304, 0);            // No extended text headers
+}
 
-    // ── Trace headers + data ──
-    for (int i = 0; i < S.nTraces; i++) {
-        SegyReceiver rec = S.receiver(i);
-        const long long offset = jsRound(rec.x - S.sourceX);
-        const size_t th = 3600 + (size_t)i * (TH + SB);
-        dv.i32(th + 0, i + 1);
-        dv.i32(th + 4, i + 1);
-        dv.i32(th + 8, S.shotNum);
-        dv.i32(th + 12, i + 1);
-        dv.i32(th + 16, S.shotNum);
-        dv.i32(th + 20, i + 1);
-        dv.i32(th + 24, i + 1);
-        dv.i16(th + 28, 1);
-        dv.i16(th + 30, 1);
-        dv.i16(th + 32, 1);
-        dv.i16(th + 34, 1);
-        dv.i32(th + 36, offset);
-        dv.i32(th + 40, 0);
-        dv.i32(th + 44, 0);
-        dv.i32(th + 48, -jsRound(S.sourceDepth));
-        dv.i32(th + 52, 0);
-        dv.i32(th + 56, 0);
-        dv.i32(th + 60, jsRound(S.oceanY));
-        dv.i32(th + 64, jsRound(rec.depth != 0 ? rec.depth : S.oceanY));
-        dv.i16(th + 68, 1);
-        dv.i16(th + 70, 1);
-        dv.i32(th + 72, jsRound(S.sourceX));
-        dv.i32(th + 76, jsRound(S.sourceY));
-        dv.i32(th + 80, jsRound(rec.x));
-        dv.i32(th + 84, jsRound(rec.y));
-        dv.i16(th + 88, 1);
-        dv.i16(th + 114, S.nSamples);
-        dv.i16(th + 116, S.dtMicros);
-        dv.i16(th + 156, S.shotNum);   // (the original stores the shot number in the "year" field)
-        const size_t ds = th + TH;
-        const float* tr = S.traces + (size_t)i * S.nSamples;
-        for (int s = 0; s < S.nSamples; s++) dv.f32(ds + (size_t)s * 4, tr[s]);
-    }
+// Trace i of S (240-byte header + samples) at buf; seq = trace sequence number in the file
+void writeTrace(uint8_t* buf, const SegySpec& S, int i, long long seq) {
+    BE dv{buf};
+    SegyReceiver rec = S.receiver(i);
+    const long long offset = jsRound(rec.x - S.sourceX);
+    const size_t th = 0;
+    dv.i32(th + 0, seq);
+    dv.i32(th + 4, seq);
+    dv.i32(th + 8, S.shotNum);
+    dv.i32(th + 12, i + 1);
+    dv.i32(th + 16, S.shotNum);
+    dv.i32(th + 20, i + 1);
+    dv.i32(th + 24, i + 1);
+    dv.i16(th + 28, 1);
+    dv.i16(th + 30, 1);
+    dv.i16(th + 32, 1);
+    dv.i16(th + 34, 1);
+    dv.i32(th + 36, offset);
+    dv.i32(th + 40, 0);
+    dv.i32(th + 44, 0);
+    dv.i32(th + 48, -jsRound(S.sourceDepth));
+    dv.i32(th + 52, 0);
+    dv.i32(th + 56, 0);
+    dv.i32(th + 60, jsRound(S.oceanY));
+    dv.i32(th + 64, jsRound(rec.depth != 0 ? rec.depth : S.oceanY));
+    dv.i16(th + 68, 1);
+    dv.i16(th + 70, 1);
+    dv.i32(th + 72, jsRound(S.sourceX));
+    dv.i32(th + 76, jsRound(S.sourceY));
+    dv.i32(th + 80, jsRound(rec.x));
+    dv.i32(th + 84, jsRound(rec.y));
+    dv.i16(th + 88, 1);
+    dv.i16(th + 114, S.nSamples);
+    dv.i16(th + 116, S.dtMicros);
+    dv.i16(th + 156, S.shotNum);   // (the original stores the shot number in the "year" field)
+    const size_t ds = th + 240;
+    const float* tr = S.traces + (size_t)i * S.nSamples;
+    for (int s = 0; s < S.nSamples; s++) dv.f32(ds + (size_t)s * 4, tr[s]);
+}
+
+} // namespace
+
+std::vector<uint8_t> buildSegy(const SegySpec& S) {
+    const size_t TB = 240 + (size_t)S.nSamples * 4;
+    std::vector<uint8_t> buf(3600 + (size_t)S.nTraces * TB, 0);
+    writeFileHeader(buf.data(), S, textLines(S, "C 2 SHOT NUMBER: " + std::to_string(S.shotNum) + "  TYPE: " + S.label),
+                    S.shotNum);
+    for (int i = 0; i < S.nTraces; i++) writeTrace(buf.data() + 3600 + (size_t)i * TB, S, i, i + 1);
     return buf;
+}
+
+// ── Line file: one SEG-Y holding every shot of a line ──────────────────────
+bool SegyLineWriter::open(const std::string& path, const SegySpec& first, const std::string& lineNote, std::string& err) {
+    close();
+    f_.open(std::filesystem::u8path(path), std::ios::binary | std::ios::trunc);
+    if (!f_) { err = "SEG-Y dosyası oluşturulamadı: " + path; return false; }
+    std::vector<uint8_t> head(3600, 0);
+    std::vector<std::string> lines = textLines(first, "C 2 LINE: " + lineNote + "  TYPE: " + first.label);
+    writeFileHeader(head.data(), first, lines, 1);
+    f_.write((const char*)head.data(), (std::streamsize)head.size());
+    nSamples_ = first.nSamples;
+    dtMicros_ = first.dtMicros;
+    seq_ = 0;
+    return (bool)f_;
+}
+
+bool SegyLineWriter::append(const SegySpec& shot, std::string& err) {
+    if (!f_.is_open()) { err = "SEG-Y dosyası açık değil."; return false; }
+    if (shot.nSamples != nSamples_ || shot.dtMicros != dtMicros_) { err = "Atışların örnek sayısı farklı."; return false; }
+    const size_t TB = 240 + (size_t)shot.nSamples * 4;
+    std::vector<uint8_t> buf((size_t)shot.nTraces * TB, 0);
+    for (int i = 0; i < shot.nTraces; i++) writeTrace(buf.data() + (size_t)i * TB, shot, i, ++seq_);
+    f_.write((const char*)buf.data(), (std::streamsize)buf.size());
+    if (!f_) { err = "SEG-Y dosyasına yazılamadı (disk dolu olabilir)."; return false; }
+    return true;
+}
+
+void SegyLineWriter::close() {
+    if (f_.is_open()) f_.close();
 }

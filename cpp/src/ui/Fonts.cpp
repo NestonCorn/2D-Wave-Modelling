@@ -35,6 +35,16 @@ const ImWchar* symbolRanges() {
     return r;
 }
 
+// Icon font: Segoe Fluent Icons (Windows 11), else Segoe MDL2 Assets (Windows 10)
+std::string iconFontFile() {
+    std::string f = winFont("SegoeIcons.ttf");
+    return f.empty() ? winFont("segmdl2.ttf") : f;
+}
+const ImWchar* iconRanges() {
+    static const ImWchar r[] = {0xE700, 0xF8FF, 0};
+    return r;
+}
+
 ImFont* addFont(const std::string& file, float size, bool withSymbols) {
     ImGuiIO& io = ImGui::GetIO();
     ImFont* f = nullptr;
@@ -53,9 +63,16 @@ ImFont* addFont(const std::string& file, float size, bool withSymbols) {
         m.OversampleH = 1;
         m.GlyphMinAdvanceX = size;
         m.GlyphOffset = ImVec2(0, size * 0.05f);
-        std::string sym = winFont("seguisym.ttf"), emo = winFont("seguiemj.ttf");
+        std::string sym = winFont("seguisym.ttf");
         if (!sym.empty()) io.Fonts->AddFontFromFileTTF(sym.c_str(), size * 0.95f, &m, symbolRanges());
-        if (!emo.empty()) io.Fonts->AddFontFromFileTTF(emo.c_str(), size * 0.95f, &m, symbolRanges());
+        // Line icons for buttons and headers (private-use code points, no clash with text)
+        ImFontConfig ic;
+        ic.MergeMode = true;
+        ic.OversampleH = 2;
+        ic.GlyphMinAdvanceX = size * 1.05f;
+        ic.GlyphOffset = ImVec2(0, size * 0.16f);
+        const std::string icons = iconFontFile();
+        if (!icons.empty()) io.Fonts->AddFontFromFileTTF(icons.c_str(), size * 0.92f, &ic, iconRanges());
     }
     return f;
 }
@@ -71,20 +88,25 @@ void loadFonts(float scale) {
         std::filesystem::path p = std::filesystem::path("assets") / "fonts" / bundled;
         return std::filesystem::exists(p) ? p.string() : winFont(win);
     };
-    const std::string regular = pick("Outfit-Regular.ttf", "segoeui.ttf");
-    const std::string bold = pick("Outfit-Bold.ttf", "segoeuib.ttf");
-    const std::string mono = pick("JetBrainsMono-Regular.ttf", "consola.ttf");
-    const std::string monoB = pick("JetBrainsMono-Bold.ttf", "consolab.ttf");
+    const std::string regular = pick("Inter-Regular.ttf", "segoeui.ttf");
+    const std::string semibold = pick("Inter-SemiBold.ttf", "seguisb.ttf");
+    std::string numeric = winFont("bahnschrift.ttf");   // DIN-style engineering face (Windows 10 1709+)
+    if (numeric.empty()) numeric = regular;
 
-    fonts.ui = addFont(regular, 15.0f * scale, true);
-    fonts.uiBold = addFont(bold, 15.0f * scale, true);
-    fonts.label = addFont(bold, 12.0f * scale, true);
-    fonts.title = addFont(bold, 21.0f * scale, true);
-    fonts.mono = addFont(mono, 13.0f * scale, true);
-    fonts.monoBold = addFont(monoB, 13.0f * scale, true);
-    fonts.canvas = addFont(mono, 18.0f * scale, true);        // canvas / gather text (drawn scaled)
-    fonts.canvasBold = addFont(monoB, 18.0f * scale, true);
-    fonts.icon = addFont(regular, 26.0f * scale, true);
+    fonts.ui = addFont(regular, 14.5f * scale, true);
+    fonts.uiBold = addFont(semibold, 14.5f * scale, true);
+    fonts.label = addFont(semibold, 12.5f * scale, true);
+    fonts.title = addFont(numeric, 17.0f * scale, true);
+    fonts.mono = addFont(numeric, 13.5f * scale, true);
+    fonts.monoBold = fonts.mono;
+    fonts.canvas = addFont(numeric, 18.0f * scale, true);        // scene / gather text (drawn scaled)
+    fonts.canvasBold = fonts.canvas;
+    {
+        ImFontConfig c;
+        c.OversampleH = 2;
+        const std::string icons = iconFontFile();
+        fonts.icon = icons.empty() ? fonts.ui : io.Fonts->AddFontFromFileTTF(icons.c_str(), 16.0f * scale, &c, iconRanges());
+    }
     io.FontDefault = fonts.ui;
 }
 

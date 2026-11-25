@@ -62,6 +62,7 @@ add_library(fdtd_core STATIC
     src/core/CpuSolver.cpp
     src/core/GpuSolver.cpp
     src/core/Segy.cpp
+    src/core/ModelImport.cpp
     src/core/ParamsIO.cpp
     src/core/Simulation.cpp)
 target_include_directories(fdtd_core PUBLIC src)

@@ -8,7 +8,7 @@ inline const char* kHeader = R"GLSL(
 layout(std430, binding = 0) buffer B0 { float P[]; };
 layout(std430, binding = 1) buffer B1 { float Vx[]; };
 layout(std430, binding = 2) buffer B2 { float Vz[]; };
-layout(std430, binding = 3) readonly buffer B3 { float Vsq[]; };
+layout(std430, binding = 3) readonly buffer B3 { float Kmod[]; };   // K = rho v^2 (Material.hpp)
 layout(std430, binding = 4) buffer B4 { float psiVx[]; };
 layout(std430, binding = 5) buffer B5 { float psiVz[]; };
 layout(std430, binding = 6) buffer B6 { float psiPx[]; };
@@ -24,6 +24,8 @@ struct StepData {
 layout(std430, binding = 10) readonly buffer B10 { StepData steps[]; };
 layout(std430, binding = 11) readonly buffer B11 { vec2 obsPos[]; };  // OBS x, depth (m)
 layout(std430, binding = 12) readonly buffer B12 { float recvK[]; };  // recvKernelTable()
+layout(std430, binding = 13) readonly buffer B13 { float buoyX[]; };  // 1 / rho at the Vx nodes
+layout(std430, binding = 14) readonly buffer B14 { float buoyZ[]; };  // 1 / rho at the Vz nodes
 
 layout(std140, binding = 0) uniform Params {
     int W; int H; int boxX0; int boxY0;
@@ -68,8 +70,8 @@ void main() {
         sDx += C[k] * (P[idx + k + 1] - P[idx - k]);
         sDz += C[k] * (P[idx + (k + 1) * W] - P[idx - k * W]);
     }
-    Vx[idx] -= dt * (sDx + px);
-    Vz[idx] -= dt * (sDz + pz);
+    Vx[idx] -= dt * buoyX[idx] * (sDx + px);
+    Vz[idx] -= dt * buoyZ[idx] * (sDz + pz);
 }
 )GLSL";
 
@@ -96,15 +98,15 @@ void main() {
         dVx += C[k] * (Vx[idx + k] - Vx[idx - k - 1]);
         dVz += C[k] * (Vz[idx + k * W] - Vz[idx - (k + 1) * W]);
     }
-    P[idx] -= dt * Vsq[idx] * (dVx + px + dVz + pz);
+    P[idx] -= dt * Kmod[idx] * (dVx + px + dVz + pz);
 }
 )GLSL";
 
-// Zero the buffer bound at binding 13 (GpuSolver::zeroBuffer; replaces glClearBufferData,
+// Zero the buffer bound at binding 15 (GpuSolver::zeroBuffer; replaces glClearBufferData,
 // which the Intel Graphics driver ignored). Grid-stride loop: any size from one dispatch.
 inline const char* kClear = R"GLSL(
 layout(local_size_x = 256) in;
-layout(std430, binding = 13) writeonly buffer B13 { float zbuf[]; };
+layout(std430, binding = 15) writeonly buffer B15 { float zbuf[]; };
 uniform uint uCount;
 void main() {
     for (uint i = gl_GlobalInvocationID.x; i < uCount; i += gl_NumWorkGroups.x * 256u) zbuf[i] = 0.0;

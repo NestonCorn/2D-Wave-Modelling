@@ -11,7 +11,7 @@ using nlohmann::ordered_json;
 namespace fs = std::filesystem;
 
 static const char* geoName(GeologyModel g) {
-    return g == GeologyModel::Flat ? "flat" : g == GeologyModel::Fault ? "fault" : "salt";
+    return g == GeologyModel::Flat ? "flat" : g == GeologyModel::Fault ? "fault" : g == GeologyModel::Imported ? "imported" : "salt";
 }
 
 std::string paramsToJson(const SimParams& p, double shipX) {
@@ -99,7 +99,8 @@ bool paramsFromJson(const std::string& text, SimParams& p, double& shipX, std::s
     if (num(j, "sl_shot", v)) p.shot_interval = (float)v;
     if (j.contains("sl_geoModel") && j["sl_geoModel"].is_string()) {
         std::string g = j["sl_geoModel"].get<std::string>();
-        p.geology = g == "flat" ? GeologyModel::Flat : g == "fault" ? GeologyModel::Fault : GeologyModel::Salt;
+        p.geology = g == "flat" ? GeologyModel::Flat : g == "fault" ? GeologyModel::Fault
+                  : g == "imported" ? GeologyModel::Imported : GeologyModel::Salt;
     }
     if (num(j, "sl_uiWidth", v)) p.domain_W = (float)v;
     if (num(j, "sl_uiHeight", v)) p.domain_H = (float)v;

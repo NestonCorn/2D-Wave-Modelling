@@ -1,6 +1,7 @@
 #pragma once
 #include <cmath>
 #include <cstdint>
+#include <fstream>
 #include <functional>
 #include <string>
 #include <vector>
@@ -21,6 +22,24 @@ struct SegySpec {
 };
 
 std::vector<uint8_t> buildSegy(const SegySpec& s);
+
+// One SEG-Y file holding every shot of a line: the file header is written from the first
+// shot, then append() adds each shot's traces (FFID = shotNum, trace sequence numbers run on
+// through the file). All shots must have the same samples per trace and sample interval.
+class SegyLineWriter {
+public:
+    ~SegyLineWriter() { close(); }
+    bool open(const std::string& path, const SegySpec& first, const std::string& lineNote, std::string& err);
+    bool append(const SegySpec& shot, std::string& err);
+    void close();
+    bool isOpen() const { return f_.is_open(); }
+    long long traceCount() const { return seq_; }
+
+private:
+    std::ofstream f_;
+    int nSamples_ = 0, dtMicros_ = 0;
+    long long seq_ = 0;
+};
 
 // Linear resampler: traces of oldSamples samples (stored `stride` apart) → newSamples samples
 // (1 ms each in practice)

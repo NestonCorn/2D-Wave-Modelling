@@ -1,6 +1,6 @@
 // Sismogram panels: port of clearGather / drawGatherLabels / drawSismogram /
 // renderGeneralWiggle plus the pan/zoom mouse handling (setupSismoEvents).
-// Coordinates are logical panel pixels (GW x GH), mapped with origin + v * k.
+// Coordinates are logical panel pixels (LW x LH: the panel size / content scale), mapped with origin + v * k.
 #include <glad/glad.h>
 #include <algorithm>
 #include <cfloat>
@@ -12,10 +12,12 @@ namespace ui {
 
 namespace {
 
-constexpr float MARGIN_TOP = 40.0f;
-constexpr float MARGIN_LEFT = 45.0f;
-constexpr float DRAW_H = GH - MARGIN_TOP;
-constexpr float PLOT_W = GW - MARGIN_LEFT - 20.0f;
+// Panel size in logical pixels (screen pixels / content scale), set per panel by drawGatherPanel
+float LW = 598.0f, LH = 550.0f;
+constexpr float MARGIN_TOP = 26.0f;     // offset axis
+constexpr float MARGIN_LEFT = 50.0f;    // time axis
+float DRAW_H = 524.0f;                  // the whole record at zoom 1
+float PLOT_W = 536.0f;
 
 // canvas 'lighter' composite → additive blending for the trace layer
 void setAdditive(const ImDrawList*, const ImDrawCmd*) { glBlendFunc(GL_SRC_ALPHA, GL_ONE); }
@@ -48,8 +50,9 @@ uint32_t grayRGBA(float v) {
 // Vertical gray colorbar in the top-right corner of the plot area (VD mode only)
 void drawColorbar(const Panel& pn, float clip) {
     ImDrawList* dl = pn.dl;
-    const float x1 = GW - 26.0f, x0 = x1 - 10.0f, y0 = MARGIN_TOP + 22.0f, y1 = y0 + 110.0f;
-    dl->AddRectFilled(pn.P(x0 - 48, y0 - 18), pn.P(x1 + 4, y1 + 8), rgba(1, 4, 8, 0.75f), 4 * pn.k);
+    // Scales with the panel: a short panel keeps its data visible
+    const float x1 = LW - 26.0f, x0 = x1 - 10.0f, y0 = MARGIN_TOP + 22.0f, y1 = y0 + std::clamp(DRAW_H * 0.35f, 44.0f, 110.0f);
+    dl->AddRectFilled(pn.P(x0 - 48, y0 - 18), pn.P(x1 + 4, y1 + 8), withAlpha(col::hull, 0.88f), 4 * pn.k);
     dl->AddRectFilledMultiColor(pn.P(x0, y0), pn.P(x1, (y0 + y1) / 2), hex(0x000000), hex(0x000000), hex(0x808080),
                                 hex(0x808080));
     dl->AddRectFilledMultiColor(pn.P(x0, (y0 + y1) / 2), pn.P(x1, y1), hex(0x808080), hex(0x808080), hex(0xffffff),
@@ -57,7 +60,7 @@ void drawColorbar(const Panel& pn, float clip) {
     dl->AddRect(pn.P(x0, y0), pn.P(x1, y1), rgba(255, 255, 255, 0.5f), 0, 0, 1.0f);
     char buf[32];
     const ImU32 tc = rgba(255, 255, 255, 0.9f);
-    TextAt(dl, fonts.canvasBold, 9 * pn.k, pn.P((x0 + x1) / 2 - 18, y0 - 6), tc, "AMP", 1);
+    TextAt(dl, fonts.canvas, 10 * pn.k, pn.P((x0 + x1) / 2 - 18, y0 - 6), tc, "Genlik", 1);
     std::snprintf(buf, sizeof(buf), "+%.2g", clip);
     TextAt(dl, fonts.canvas, 9 * pn.k, pn.P(x0 - 4, y0 + 3), tc, buf, 2);
     TextAt(dl, fonts.canvas, 9 * pn.k, pn.P(x0 - 4, (y0 + y1) / 2 + 3), tc, "0", 2);
@@ -71,10 +74,6 @@ float totalOffsetMax(const Simulation& sim) {
                                                                       : (p.src_rec_dist + p.src_offset + p.cable_len);
 }
 
-void textShadow(ImDrawList* dl, ImFont* f, float size, ImVec2 pos, ImU32 c, const char* t, int align) {
-    TextAt(dl, f, size, ImVec2(pos.x + 1, pos.y + 1), rgba(0, 0, 0, 0.8f), t, align);
-    TextAt(dl, f, size, pos, c, t, align);
-}
 
 void ensureTexture(GatherView& gv, int slot, int w, int h, bool smooth) {
     if (!gv.vdTex[slot]) glGenTextures(1, &gv.vdTex[slot]);
@@ -111,8 +110,8 @@ void renderTraces(const Panel& pn, Simulation& sim, GatherView& gv, int slot, si
         dl->AddCallback(setNormal, nullptr);   // opaque image: no additive blending
         if (gv.smooth) {
             // Bicubic (Catmull-Rom) resampling at screen resolution over the visible part only
-            const float vx0 = std::max(X0, MARGIN_LEFT), vx1 = std::min(X0 + ww, GW - 20.0f);
-            const float vy0 = std::max(Y0, MARGIN_TOP), vy1 = std::min(Y0 + hh, (float)GH);
+            const float vx0 = std::max(X0, MARGIN_LEFT), vx1 = std::min(X0 + ww, LW - 12.0f);
+            const float vy0 = std::max(Y0, MARGIN_TOP), vy1 = std::min(Y0 + hh, (float)LH);
             if (vx1 <= vx0 || vy1 <= vy0) { dl->AddCallback(setAdditive, nullptr); return; }
             const int ow = std::clamp((int)std::ceil((vx1 - vx0) * pn.k), 1, 4096);
             const int oh = std::clamp((int)std::ceil((vy1 - vy0) * pn.k), 1, 4096);
@@ -216,7 +215,7 @@ void renderTraces(const Panel& pn, Simulation& sim, GatherView& gv, int slot, si
     const float qScale = yScale / sub;
     // Only the points inside the visible time range (one sample of margin on both sides).
     const int qBeg = std::clamp(((int)std::floor((MARGIN_TOP - y0) / yScale) - 1) * sub, 0, max_y * sub);
-    const int qEnd = std::clamp(((int)std::ceil((GH - y0) / yScale) + 1) * sub, 0, max_y * sub);
+    const int qEnd = std::clamp(((int)std::ceil((LH - y0) / yScale) + 1) * sub, 0, max_y * sub);
     if (qEnd <= qBeg) return;
 
     const ImDrawListFlags oldFlags = dl->Flags;
@@ -257,7 +256,7 @@ void renderTraces(const Panel& pn, Simulation& sim, GatherView& gv, int slot, si
 
     for (int i = 0; i < count; i += step) {
         const float gx = baseX + gv.panX + i * trSpacing;
-        if (gx < MARGIN_LEFT - maxDx || gx > GW - 20 + maxDx) continue;
+        if (gx < MARGIN_LEFT - maxDx || gx > LW - 12 + maxDx) continue;
         const float* tr = data + (size_t)i * S;
         if (dec > 1) {   // several samples per screen pixel: min / max of each group
             drawEnvelope(tr, gx);
@@ -348,42 +347,55 @@ void handleInput(GatherView& gv, ImVec2 o, float k) {
 
 } // namespace
 
-void drawGatherPanel(Simulation& sim, GatherView& gv, int panel, ImVec2 o, float k) {
+void drawGatherPanel(Simulation& sim, GatherView& gv, int panel, ImVec2 o, ImVec2 size) {
     const bool isOBS = panel == 1;
     const SimParams& p = sim.p;
+    const float k = S(1.0f);
+    LW = std::max(120.0f, size.x / k);
+    LH = std::max(80.0f, size.y / k);
+    DRAW_H = LH - MARGIN_TOP;
+    PLOT_W = LW - MARGIN_LEFT - 12.0f;
     ImGui::SetCursorScreenPos(o);
-    ImGui::InvisibleButton(isOBS ? "##obsGather" : "##gather", ImVec2(GW * k, GH * k));
+    ImGui::InvisibleButton(isOBS ? "##obsGather" : "##gather", ImVec2(LW * k, LH * k));
     handleInput(gv, o, k);
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     Panel pn{dl, o, k};
     const float maxMs = (float)p.sismo_ms;
-    dl->PushClipRect(pn.P(0, 0), pn.P(GW, GH), true);
+    dl->PushClipRect(pn.P(0, 0), pn.P(LW, LH), true);
 
     // ── Background + grid (clearGather) ──
-    dl->AddRectFilledMultiColor(pn.P(0, 0), pn.P(GW, GH), hex(0x020812), hex(0x020812), hex(0x000105), hex(0x000105));
-    dl->PushClipRect(pn.P(MARGIN_LEFT, MARGIN_TOP), pn.P(GW - 20, GH), true);
-    for (int ms = 0; ms <= p.sismo_ms; ms += 50) {
-        float y = MARGIN_TOP + gv.panY + (ms / maxMs) * DRAW_H * gv.zoomY;
-        if (y < MARGIN_TOP - 10 || y > GH + 10) continue;
-        bool major = ms % 500 == 0, secondary = ms % 100 == 0;
-        ImU32 c = major ? rgba(255, 255, 255, 0.15f) : secondary ? rgba(255, 255, 255, 0.08f) : rgba(255, 255, 255, 0.03f);
-        float w = major ? 1.2f : secondary ? 0.8f : 0.5f;
-        dl->AddLine(pn.P(0, y), pn.P(GW, y), c, std::max(1.0f, w * k));
-    }
-    if (!isOBS) {
-        const float total = totalOffsetMax(sim);
-        const float step = total > 1200 ? 500.f : (total > 600 ? 200.f : 100.f);
-        for (float d = 0; d <= total; d += step) {
-            float x = MARGIN_LEFT + gv.panX + (1.0f - d / total) * PLOT_W * gv.zoomX;
-            dl->AddLine(pn.P(x, MARGIN_TOP), pn.P(x, GH), rgba(255, 255, 255, 0.06f), 1.0f);
-        }
-    } else {
-        const float maxDist = (float)(sim.W_sim * sim.SCALE);
-        for (float d = 0; d <= maxDist; d += 200) {
-            float x = MARGIN_LEFT + gv.panX + (d / maxDist) * PLOT_W * gv.zoomX;
-            dl->AddLine(pn.P(x, MARGIN_TOP), pn.P(x, GH), rgba(255, 255, 255, 0.05f), 1.0f);
-        }
+    dl->AddRectFilled(pn.P(0, 0), pn.P(LW, LH), hex(0x0B1620));
+    dl->PushClipRect(pn.P(MARGIN_LEFT, MARGIN_TOP), pn.P(LW - 12, LH), true);
+    // Axis steps: the smallest "nice" step whose labels do not touch at the current zoom
+    auto niceStep = [](float pxPerUnit, float minPx) {
+        static const float steps[] = {1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 2500, 5000, 10000, 20000};
+        for (float st : steps) if (st * pxPerUnit >= minPx) return st;
+        return 50000.0f;
+    };
+    const float pxPerMs = DRAW_H * gv.zoomY / maxMs;
+    const float tStep = niceStep(pxPerMs, 28.0f);
+    const float tMinor = tStep / 5.0f * pxPerMs >= 7.0f ? tStep / 5.0f : 0.0f;
+    const float msLo = std::max(0.0f, -gv.panY / pxPerMs), msHi = std::min(maxMs, (LH - MARGIN_TOP - gv.panY) / pxPerMs);
+    auto yOf = [&](float ms) { return MARGIN_TOP + gv.panY + ms * pxPerMs; };
+    if (tMinor > 0)
+        for (float ms = std::floor(msLo / tMinor) * tMinor; ms <= msHi; ms += tMinor)
+            dl->AddLine(pn.P(MARGIN_LEFT, yOf(ms)), pn.P(LW, yOf(ms)), rgba(201, 214, 226, 0.035f), 1.0f);
+    for (float ms = std::floor(msLo / tStep) * tStep; ms <= msHi; ms += tStep)
+        dl->AddLine(pn.P(MARGIN_LEFT, yOf(ms)), pn.P(LW, yOf(ms)), rgba(201, 214, 226, 0.11f), 1.0f);
+
+    // Horizontal axis: streamer = distance from the source (decreasing to the right), OBS = position
+    const float axisTotal = isOBS ? (float)(sim.W_sim * sim.SCALE) : totalOffsetMax(sim);
+    const float pxPerM = PLOT_W * gv.zoomX / std::max(1.0f, axisTotal);
+    const float dStep = niceStep(pxPerM, 64.0f);
+    auto xOf = [&](float d) {
+        return isOBS ? MARGIN_LEFT + gv.panX + (d / axisTotal) * PLOT_W * gv.zoomX
+                     : MARGIN_LEFT + gv.panX + (1.0f - d / axisTotal) * PLOT_W * gv.zoomX;
+    };
+    for (float d = 0; d <= axisTotal + 0.01f; d += dStep) {
+        const float x = xOf(d);
+        if (x < MARGIN_LEFT - 2 || x > LW) continue;
+        dl->AddLine(pn.P(x, MARGIN_TOP), pn.P(x, LH), rgba(201, 214, 226, 0.06f), 1.0f);
     }
 
     // ── Traces (drawSismogram, additive) ──
@@ -395,14 +407,14 @@ void drawGatherPanel(Simulation& sim, GatherView& gv, int panel, ImVec2 o, float
         const float total = totalOffsetMax(sim);
         const float xr1 = MARGIN_LEFT + (1.0f - p.src_rec_dist / total) * PLOT_W;
         const float xl1 = MARGIN_LEFT + (1.0f - (p.src_rec_dist + p.cable_len) / total) * PLOT_W;
-        renderTraces(pn, sim, gv, 0, 0, sim.N_REC, yProgress, xl1, xr1 - xl1, hex(0xff1744));
+        renderTraces(pn, sim, gv, 0, 0, sim.N_REC, yProgress, xl1, xr1 - xl1, hex(0xD9E2EA));
         if (sim.lastMode == Mode::CLO) {
             const float xr2 = MARGIN_LEFT + (1.0f - (p.src_rec_dist + p.src_offset) / total) * PLOT_W;
             const float xl2 = MARGIN_LEFT + (1.0f - (p.src_rec_dist + p.src_offset + p.cable_len) / total) * PLOT_W;
-            renderTraces(pn, sim, gv, 1, (size_t)sim.N_REC * kSismoStride, sim.N_REC, yProgress, xl2, xr2 - xl2, hex(0x1e90ff));
+            renderTraces(pn, sim, gv, 1, (size_t)sim.N_REC * kSismoStride, sim.N_REC, yProgress, xl2, xr2 - xl2, col::data);
         }
     } else if (p.obs_enabled) {
-        renderTraces(pn, sim, gv, 2, (size_t)sim.N_REC * 2 * kSismoStride, sim.N_OBS, yProgress, MARGIN_LEFT, PLOT_W, hex(0xfbbf24));
+        renderTraces(pn, sim, gv, 2, (size_t)sim.N_REC * 2 * kSismoStride, sim.N_OBS, yProgress, MARGIN_LEFT, PLOT_W, col::warn);
     }
     dl->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
     dl->PopClipRect();
@@ -410,53 +422,21 @@ void drawGatherPanel(Simulation& sim, GatherView& gv, int panel, ImVec2 o, float
 
     // ── Labels (drawGatherLabels) ──
     char buf[64];
-    for (int ms = 0; ms <= p.sismo_ms; ms += 50) {
-        float y = MARGIN_TOP + gv.panY + (ms / maxMs) * DRAW_H * gv.zoomY;
-        if (y < MARGIN_TOP - 5 || y > GH + 10) continue;
-        bool major = ms % 500 == 0, secondary = ms % 100 == 0;
-        bool isLast = std::abs(ms - p.sismo_ms) < 1;
-        if (major || (secondary && ms < 1000) || isLast) {
-            std::snprintf(buf, sizeof(buf), "%dms", ms);
-            textShadow(dl, (major || isLast) ? fonts.canvasBold : fonts.canvas, 10 * k, pn.P(8, isLast ? y - 2 : y - 4),
-                       (major || isLast) ? rgba(255, 255, 255, 0.95f) : rgba(255, 255, 255, 0.7f), buf, 0);
-        }
+    for (float ms = std::floor(msLo / tStep) * tStep; ms <= msHi; ms += tStep) {
+        const float y = yOf(ms);
+        if (y < MARGIN_TOP - 2 || y > LH - 6) continue;
+        std::snprintf(buf, sizeof(buf), "%g ms", ms);
+        TextAt(dl, fonts.canvas, 11.5f * k, pn.P(MARGIN_LEFT - 6, std::max(y + 4, MARGIN_TOP + 10)), ms == 0 ? col::muted : col::text, buf, 2);
     }
-    if (!isOBS) {
-        const float total = totalOffsetMax(sim);
-        textShadow(dl, fonts.canvasBold, 9 * k, pn.P(MARGIN_LEFT + PLOT_W / 2, 12), rgba(255, 255, 255, 0.9f),
-                   "UNIFIED OFFSET GATHER (METERS)", 1);
-        const float step = total > 1200 ? 500.f : (total > 600 ? 200.f : 100.f);
-        for (float d = 0; d <= total; d += step) {
-            float x = MARGIN_LEFT + gv.panX + (1.0f - d / total) * PLOT_W * gv.zoomX;
-            if (x < MARGIN_LEFT - 20 || x > GW) continue;
-            std::snprintf(buf, sizeof(buf), "%dm", (int)std::lround(d));
-            textShadow(dl, fonts.canvasBold, 10 * k, pn.P(x, 30), rgba(138, 180, 212, 0.95f), buf, 1);
-        }
-    } else {
-        const float maxDist = (float)(sim.W_sim * sim.SCALE);
-        for (float d = 0; d <= maxDist; d += 200) {
-            float x = MARGIN_LEFT + gv.panX + (d / maxDist) * PLOT_W * gv.zoomX;
-            if (x < MARGIN_LEFT - 20 || x > GW) continue;
-            std::snprintf(buf, sizeof(buf), "%gm", d);
-            if (x < GW - 20) textShadow(dl, fonts.canvasBold, 10 * k, pn.P(x, 30), rgba(251, 191, 36, 0.95f), buf, 1);
-        }
+    for (float d = 0; d <= axisTotal + 0.01f; d += dStep) {
+        const float x = xOf(d);
+        if (x < MARGIN_LEFT + 10 || x > LW - 24) continue;
+        std::snprintf(buf, sizeof(buf), "%g m", d);
+        TextAt(dl, fonts.canvas, 11.5f * k, pn.P(x, 18), col::muted, buf, 1);
     }
-    std::snprintf(buf, sizeof(buf), "FS:%dHz", (int)std::lround(1000.0 / p.dt));
-    textShadow(dl, fonts.canvasBold, 10 * k, pn.P(GW - 60, GH - 25), rgba(0, 229, 160, 0.95f), buf, 0);
-    std::snprintf(buf, sizeof(buf), "DX:%gm", sim.SCALE);
-    textShadow(dl, fonts.canvasBold, 10 * k, pn.P(GW - 60, GH - 12), rgba(0, 229, 160, 0.95f), buf, 0);
-
-    // Pane label (bottom-right badge in the HTML)
-    const char* lbl = isOBS ? "OBS SİSMOGRAM (GATHER)" : "STREAMER SİSMOGRAM (GATHER)";
-    ImVec2 ts = fonts.label->CalcTextSizeA(10 * k, FLT_MAX, 0, lbl);
-    ImVec2 b1 = pn.P(GW - 15, GH - 15), b0(b1.x - ts.x - 20 * k, b1.y - ts.y - 8 * k);
-    b0.y -= 26 * k; b1.y -= 26 * k;   // keep clear of the FS/DX annotation
-    dl->AddRectFilled(b0, b1, rgba(1, 4, 8, 0.85f), 6 * k);
-    dl->AddRect(b0, b1, rgba(30, 144, 255, 0.25f), 6 * k);
-    dl->AddText(fonts.label, 10 * k, ImVec2(b0.x + 10 * k, b0.y + 4 * k), hex(0x528bff), lbl);
-
     dl->PopClipRect();
-    dl->AddRect(pn.P(0, 0), pn.P(GW, GH), hex(0x0d2040), 12 * k, 0, 1.0f);
+    dl->AddLine(pn.P(MARGIN_LEFT, MARGIN_TOP), pn.P(LW - 12, MARGIN_TOP), col::bulkhead);
+    dl->AddLine(pn.P(MARGIN_LEFT, MARGIN_TOP), pn.P(MARGIN_LEFT, LH), col::bulkhead);
 }
 
 } // namespace ui

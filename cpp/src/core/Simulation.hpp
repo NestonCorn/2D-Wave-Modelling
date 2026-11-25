@@ -8,7 +8,10 @@
 #include "Eikonal.hpp"
 #include "Geology.hpp"
 #include "GpuSolver.hpp"
+#include "Material.hpp"
+#include "ModelImport.hpp"
 #include "Params.hpp"
+#include "Segy.hpp"
 #include "Wavelet.hpp"
 
 struct Shot { bool main; double t0; };
@@ -62,11 +65,43 @@ public:
     void onDomainHeight(double now);
     void onObsSpacing();
 
+    // ── Imported subsurface model ──
+    // vel (m/s) is required; rho (g/cm^3) may be empty: the density then follows the
+    // velocity (Gardner). z = 0 of the model is the sea surface; the domain takes the
+    // model's size. Fails (and changes nothing) on an unusable model.
+    bool loadModel(GridModel vel, GridModel rho, std::string& err);
+    void clearModel();   // back to the built-in flat-layer model
+    bool hasModel() const { return !modelVel_.empty(); }
+    const GridModel& modelVelocity() const { return modelVel_; }
+    const GridModel& modelDensity() const { return modelRho_; }
+    // Seafloor depth (m from the top of the domain) at x: OBS placement, drawing, SEG-Y
+    double seafloorDepth(double x) const;
+
     // ── SEG-Y live recording ──
     bool segyRecording() const { return segyRecording_; }
+    int segyShotsSaved() const { return segyShotNum_; }
     void segyStart(const std::string& rootFolder);   // UI already picked the folder
     void segyStop(double now);
     const std::string& segyButtonLabel(double now);
+
+    // ── Line simulation: every shot of a line into one SEG-Y per receiver type ──
+    // Shot k fires at source x = firstX + k * interval with the current geometry and
+    // parameters (traditional single-source shooting, the ship stationary during each
+    // record). Each shot starts from a quiet wavefield and runs for the recording length;
+    // its streamer and OBS gathers are appended to line_streamer.segy / line_obs.segy in a
+    // new folder under `folder`. Runs batch by batch from update(), so the UI stays live.
+    struct LineSettings {
+        double firstX = 0, interval = 25;
+        int nShots = 1;
+        std::string folder;
+    };
+    bool startLine(const LineSettings& s, std::string& err);
+    void cancelLine();
+    bool lineActive() const { return line_.active; }
+    int lineShotsDone() const { return line_.shot; }
+    int lineShots() const { return line_.n; }
+    double lineProgress() const;   // 0..1 over the whole line
+    const std::string& lineFolder() const { return line_.dir; }
 
     // ── Parameter files ──
     std::string configJson() const;
@@ -87,8 +122,10 @@ public:
     }
     int sjSurf() const { return (int)std::floor(OCEAN_Y / SCALE); }
 
-    // Alerts raised by actions (UI shows them in a modal, then clears)
+    // Alerts raised by actions: problems the user must read (UI shows them in a modal, then clears)
     std::vector<std::string> alerts;
+    // Confirmations (finished line, ...): the UI shows them briefly and clears them
+    std::vector<std::string> notices;
 
     // ── State read by the UI ──
     SimParams p;
@@ -98,7 +135,9 @@ public:
     int N_REC = 57, N_OBS = 24;
     double sxShip = 370.0, sxSrc = 720.0;
     GeoLayout layout;
-    std::vector<float> vsq;
+    std::vector<float> vsq;              // (v / 6000)^2 on the grid
+    std::vector<float> rho;              // density on the grid, g/cm^3
+    unsigned modelTex = 0;               // velocity image of an imported model (scene background)
     std::vector<float> sismo;            // last finished batch (display + SEG-Y)
 
     Mode mode = Mode::None, lastMode = Mode::None;
@@ -129,6 +168,9 @@ private:
     void initGPU();
     void updateCpml();
     void computeObsPositions();
+    void fillModel();                // vsq, rho, material and layout for the current geology and grid
+    void pushMaterial();             // material + CPML to both engines
+    void createModelTexture();
     void clearAllFields();           // P/V/psi on both engines + texture
     void clearSismoAll();
     void clearWaveTexture();
@@ -142,6 +184,10 @@ private:
     void finishEikonal();
     void waitEikonal();
     void segySnapshotAndSave();
+    void beginLineShot();
+    void lineIteration();
+    bool appendLineShot(std::string& err);
+    void finishLine(bool ok, const std::string& why);
     void checkInstabilityFromSismo();
     void setInstability();
 
@@ -152,6 +198,9 @@ private:
     long long maxSsbo_ = 0;
 
     std::vector<float> bx_, ax_, bz_, az_;
+    GridModel modelVel_, modelRho_;
+    Material mat_;
+    double vmaxNorm_ = 0.68, vminMs_ = 1500.0;   // model extremes (CPML damping, CFL / dispersion status)
     std::vector<float> obsX_, obsY_;
     double accumulated_ = 0;
     double simTime_ = 0;             // simulated seconds since the cycle start (expanding-box clock; survives dt changes)
@@ -187,4 +236,15 @@ private:
     double segyLabelRevertAt_ = -1;
 
     std::vector<uint32_t> zeroTex_;
+
+    // Line simulation
+    struct LineJob {
+        bool active = false;
+        int shot = 0, n = 0;            // shots finished, shots planned
+        double firstX = 0, interval = 25;
+        float savedSpeed = 0;
+        double savedShipX = 0;
+        std::string dir;
+        SegyLineWriter streamer, obs;
+    } line_;
 };

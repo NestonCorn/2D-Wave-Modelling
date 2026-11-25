@@ -2,6 +2,7 @@
 #include <map>
 #include <string>
 #include <vector>
+#include "Material.hpp"
 #include "SolverTypes.hpp"
 
 // OpenGL 4.3 compute-shader FDTD engine (port of gpu_engine.js).
@@ -23,7 +24,7 @@ public:
         return ready_ && W == W_ && H == H_ && nRec == nRec_ && nObs == nObs_;
     }
 
-    void setVsq(const std::vector<float>& vsq);
+    void setMaterial(const Material& m);   // K = rho v^2, buoyancy at the Vx / Vz nodes
     void setCpml(const std::vector<float>& bx, const std::vector<float>& ax,
                  const std::vector<float>& bz, const std::vector<float>& az);
     void setCpmlZ(const std::vector<float>& bz, const std::vector<float>& az);
@@ -52,11 +53,11 @@ private:
     bool ready_ = false;
     int W_ = 0, H_ = 0, nRec_ = 0, nObs_ = 0;
     size_t sismoSize_ = 0;
-    unsigned buf_[13]{};       // SSBOs by binding index (Binding in GpuSolver.cpp)
-    size_t bufFloats_[13]{};   // their sizes (floats)
+    unsigned buf_[15]{};       // SSBOs by binding index (Binding in GpuSolver.cpp)
+    size_t bufFloats_[15]{};   // their sizes (floats)
     unsigned clearProg_ = 0;   // kClear
     int clearCountLoc_ = -1;
-    static constexpr int kClearBinding = 13;   // kClear's target buffer
+    static constexpr int kClearBinding = 15;   // kClear's target buffer
     void zeroBuffer(int b);
     unsigned ubo_ = 0, readback_ = 0;
     std::map<int, Programs> programs_;

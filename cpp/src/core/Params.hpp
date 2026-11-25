@@ -3,7 +3,7 @@
 // with the same defaults (ranges live next to the widgets in ui/App.cpp).
 
 enum class Mode { None, CLO, SLO, Trad };
-enum class GeologyModel { Flat = 0, Fault = 1, Salt = 2 };
+enum class GeologyModel { Flat = 0, Fault = 1, Salt = 2, Imported = 3 };   // Imported: loaded from files
 enum class Wavelet { Ricker = 0, MinPhase = 1, Gauss = 2, GaussDeriv = 3 };
 
 // Sismogram panel size in logical pixels (GW x GH in the HTML)

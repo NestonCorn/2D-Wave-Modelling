@@ -19,7 +19,9 @@ int tileDim(int which) {
 }
 int tileX() { return tileDim(0); }
 int tileY() { return tileDim(1); }
-enum Binding { B_P = 0, B_VX, B_VZ, B_VSQ, B_PSIVX, B_PSIVZ, B_PSIPX, B_PSIPZ, B_CPML, B_SISMO, B_STEPS, B_OBS, B_RECVK, B_COUNT };
+enum Binding { B_P = 0, B_VX, B_VZ, B_K, B_PSIVX, B_PSIVZ, B_PSIPX, B_PSIPZ, B_CPML, B_SISMO, B_STEPS, B_OBS, B_RECVK,
+               B_BUOYX, B_BUOYZ, B_COUNT };
+static_assert(B_COUNT <= 15, "binding 15 is kClear's");
 
 struct ParamsUBO {   // std140, all scalars → tightly packed
     int W, H, boxX0, boxY0;
@@ -43,6 +45,12 @@ bool GpuSolver::queryCapabilities(std::string& renderer, std::string& reason, lo
     }
     GLint blocks = 0;
     glGetIntegerv(GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS, &blocks);
+    GLint bindings = 0;
+    glGetIntegerv(GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS, &bindings);
+    if (bindings < 16) {
+        reason = "GPU yeterli storage buffer bağlama noktası sunmuyor (" + std::to_string(bindings) + " < 16).";
+        return false;
+    }
     if (blocks < 12) {
         reason = "GPU compute shader başına yeterli storage buffer sunmuyor (" + std::to_string(blocks) + " < 12).";
         return false;
@@ -81,7 +89,7 @@ bool GpuSolver::init(int W, int H, int nRec, int nObs, std::string& err) {
     // the AMD driver placed them in system memory once they outgrew the caches, and every step
     // streamed the whole wavefield over PCIe (~14 GB/s, i.e. ~200 Mcells/s on any grid size).
     // Only the small per-batch buffers keep CPU-update rights (GL_DYNAMIC_STORAGE_BIT);
-    // the velocity model goes up through a staging copy (setVsq).
+    // the material model goes up through a staging copy (setMaterial).
     // Buffers are created from zero-filled data. glClearBufferData is not used anywhere: the
     // Intel Graphics driver ignored it on these GPU-only buffers, so a new solver could start
     // from a deleted buffer's contents (Vz came up holding the previous velocity model) and
@@ -95,7 +103,7 @@ bool GpuSolver::init(int W, int H, int nRec, int nObs, std::string& err) {
         else glBufferData(GL_SHADER_STORAGE_BUFFER, bytes, zeros.data(), cpuWritable ? GL_DYNAMIC_DRAW : GL_STATIC_DRAW);
         bufFloats_[b] = bytes / 4;
     };
-    for (int b : {B_P, B_VX, B_VZ, B_VSQ, B_PSIVX, B_PSIVZ, B_PSIPX, B_PSIPZ}) alloc(b, N * 4, false);
+    for (int b : {B_P, B_VX, B_VZ, B_K, B_PSIVX, B_PSIVZ, B_PSIPX, B_PSIPZ, B_BUOYX, B_BUOYZ}) alloc(b, N * 4, false);
     alloc(B_CPML, (size_t)(2 * W + 2 * H) * 4, true);
     alloc(B_SISMO, sismoSize_ * 4, false);
     alloc(B_STEPS, (size_t)MAX_STEPS * sizeof(StepData), true);
@@ -172,16 +180,21 @@ bool GpuSolver::ensurePrograms(int order, std::string& err) {
     return true;
 }
 
-void GpuSolver::setVsq(const std::vector<float>& vsq) {
+void GpuSolver::setMaterial(const Material& m) {
     wait();
-    // The model buffer is GPU-only: upload through a temporary staging buffer
-    GLuint staging = 0;
-    glGenBuffers(1, &staging);
-    glBindBuffer(GL_COPY_READ_BUFFER, staging);
-    glBufferData(GL_COPY_READ_BUFFER, vsq.size() * 4, vsq.data(), GL_STREAM_COPY);
-    glBindBuffer(GL_COPY_WRITE_BUFFER, buf_[B_VSQ]);
-    glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0, vsq.size() * 4);
-    glDeleteBuffers(1, &staging);
+    // The model buffers are GPU-only: upload through a temporary staging buffer
+    auto upload = [&](int b, const std::vector<float>& v) {
+        GLuint staging = 0;
+        glGenBuffers(1, &staging);
+        glBindBuffer(GL_COPY_READ_BUFFER, staging);
+        glBufferData(GL_COPY_READ_BUFFER, v.size() * 4, v.data(), GL_STREAM_COPY);
+        glBindBuffer(GL_COPY_WRITE_BUFFER, buf_[b]);
+        glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0, v.size() * 4);
+        glDeleteBuffers(1, &staging);
+    };
+    upload(B_K, m.K);
+    upload(B_BUOYX, m.buoyX);
+    upload(B_BUOYZ, m.buoyZ);
 }
 
 void GpuSolver::setCpml(const std::vector<float>& bx, const std::vector<float>& ax,

@@ -13,6 +13,7 @@
 #include <limits>
 #include <thread>
 #include "Cpml.hpp"
+#include "Material.hpp"
 #include "ParamsIO.hpp"
 #include "Segy.hpp"
 
@@ -41,7 +42,12 @@ double physicalRamBytes() {
     return 8e9;
 }
 const char* geoUpper(GeologyModel g) {
-    return g == GeologyModel::Flat ? "FLAT" : g == GeologyModel::Fault ? "FAULT" : "SALT";
+    return g == GeologyModel::Flat ? "FLAT" : g == GeologyModel::Fault ? "FAULT" : g == GeologyModel::Imported ? "IMPORTED" : "SALT";
+}
+// Sum of |FD coefficients| (CFL limit: v_n dt sqrt(2) sum <= 1)
+double cSum(int order) {
+    switch (order) { case 4: return 1.166; case 6: return 1.241; case 8: return 1.28; case 10: return 1.31; }
+    return 1.0;
 }
 } // namespace
 
@@ -53,6 +59,7 @@ Simulation::~Simulation() {
     if (glAvailable_) {
         gpu_.destroy();
         if (waveTex) glDeleteTextures(1, &waveTex);
+        if (modelTex) glDeleteTextures(1, &modelTex);
     }
 }
 
@@ -74,13 +81,13 @@ void Simulation::regridNow() {
 
     // Memory guard: the sliders allow e.g. 25 km x 12 km at 0.5 m (1.2 billion cells,
     // ~65 GB). Coarsen the grid until the fields fit in half of the physical RAM
-    // (~56 bytes per cell: 8 float fields, pixels, V^2 copy, eikonal tables).
+    // (~80 bytes per cell: 10 float fields, pixels, V^2 / density / material copies, eikonal tables).
     SCALE = p.dh;
     bool coarsened = false;
     for (;;) {
         W_sim = (int)std::floor(p.domain_W / SCALE) + 1;
         H_sim = (int)std::floor(p.domain_H / SCALE) + 1;
-        if ((double)W_sim * H_sim * 56.0 <= 0.5 * physicalRamBytes() || SCALE >= 8.0) break;
+        if ((double)W_sim * H_sim * 80.0 <= 0.5 * physicalRamBytes() || SCALE >= 8.0) break;
         SCALE = std::min(8.0, SCALE * 2.0);
         coarsened = true;
     }
@@ -96,8 +103,7 @@ void Simulation::regridNow() {
     // sync with the domain width avoids OBS stations outside the model.
     N_OBS = std::max(0, (int)std::floor((W_sim * SCALE) / p.obs_spacing));
 
-    fillVsq(vsq, W_sim, H_sim, SCALE, p.geology, p.domain_W, p.domain_H);
-    layout = buildLayout(p.geology, p.domain_W, p.domain_H);
+    fillModel();
     computeObsPositions();
     updateCpml();
     if (glAvailable_) createWaveTexture();
@@ -119,7 +125,7 @@ void Simulation::rebuildEngines() {
     // needs a few dozen rows of its own to stay out of its neighbours' way.
     const int nThreads = std::clamp(hc / 2 + 1, 1, std::max(1, H_sim / 16));
     cpu_.init(W_sim, H_sim, nThreads, sismoSize);
-    cpu_.setVsq(vsq);
+    cpu_.setMaterial(mat_);
     cpu_.setCpml(bx_, ax_, bz_, az_);
     threadStats.assign(cpu_.threadCount(), {});
     sismo.assign(sismoSize, 0.0f);
@@ -155,7 +161,7 @@ void Simulation::initGPU() {
     }
     std::string err;
     if (gpu_.matches(W_sim, H_sim, N_REC, N_OBS)) {
-        gpu_.setVsq(vsq);
+        gpu_.setMaterial(mat_);
         gpu_.setCpml(bx_, ax_, bz_, az_);
         gpu_.setObs(obsX_, obsY_);
         if (gpu_.ensurePrograms(p.fd_order, err)) {
@@ -164,7 +170,7 @@ void Simulation::initGPU() {
             return;
         }
     } else if (gpu_.init(W_sim, H_sim, N_REC, N_OBS, err)) {
-        gpu_.setVsq(vsq);
+        gpu_.setMaterial(mat_);
         gpu_.setCpml(bx_, ax_, bz_, az_);
         gpu_.setObs(obsX_, obsY_);
         if (gpu_.ensurePrograms(p.fd_order, err)) {
@@ -179,8 +185,8 @@ void Simulation::initGPU() {
 }
 
 void Simulation::updateCpml() {
-    cpmlX(W_sim, p.npml, p.dt, bx_, ax_);
-    cpmlZ(H_sim, p.npml, p.dt, OCEAN_Y, SCALE, p.free_surface, bz_, az_);
+    cpmlX(W_sim, p.npml, p.dt, bx_, ax_, vmaxNorm_);
+    cpmlZ(H_sim, p.npml, p.dt, OCEAN_Y, SCALE, p.free_surface, bz_, az_, vmaxNorm_);
 }
 
 void Simulation::computeObsPositions() {
@@ -189,8 +195,172 @@ void Simulation::computeObsPositions() {
     for (int i = 0; i < N_OBS; i++) {
         double rx = (i + 1) * (double)p.obs_spacing;
         obsX_[i] = (float)rx;
-        obsY_[i] = (float)(obsSeafloorDepth(p.geology, rx, p.domain_W, p.domain_H) + 4.0);   // slight offset below seabed
+        obsY_[i] = (float)(seafloorDepth(rx) + 4.0);   // slight offset below seabed
     }
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// Model: velocity, density and material on the grid
+// ══════════════════════════════════════════════════════════════════════════
+void Simulation::fillModel() {
+    const size_t N = (size_t)W_sim * H_sim;
+    if (p.geology == GeologyModel::Imported && !hasModel()) p.geology = GeologyModel::Flat;
+    if (p.geology == GeologyModel::Imported) {
+        // z = 0 of the model is the sea surface; the strip above it takes the top values
+        vsq.resize(N);
+        rho.resize(N);
+        const bool haveRho = !modelRho_.empty();
+        for (int j = 0; j < H_sim; j++) {
+            const double z = std::max(0.0, j * SCALE - OCEAN_Y);
+            for (int i = 0; i < W_sim; i++) {
+                const double x = i * SCALE;
+                const double v = modelVel_.sample(x, z);
+                const double vn = v / kVelocityNorm;
+                const size_t idx = (size_t)j * W_sim + i;
+                vsq[idx] = (float)(vn * vn);
+                rho[idx] = haveRho ? modelRho_.sample(x, z) : gardnerDensity(v);
+            }
+        }
+        // Seafloor: first depth below the surface where the velocity leaves the water range
+        layout = GeoLayout{};
+        const int nPts = 400;
+        const double step = std::max(0.25, std::min(modelVel_.dz, SCALE) * 0.5);
+        for (int k = 0; k < nPts; k++) {
+            const double x = p.domain_W * k / (nPts - 1);
+            double z = 0;
+            while (z < modelVel_.depth() && modelVel_.sample(x, z) <= 1600.0) z += step;
+            layout.seafloor.push_back({(float)x, (float)(OCEAN_Y + z)});
+        }
+    } else {
+        fillVsq(vsq, W_sim, H_sim, SCALE, p.geology, p.domain_W, p.domain_H);
+        densityFromVsq(vsq, rho);
+        layout = buildLayout(p.geology, p.domain_W, p.domain_H);
+    }
+    float mx = 0.0f, mn = 1e30f;
+    for (float x : vsq) { mx = std::max(mx, x); mn = std::min(mn, x); }
+    vmaxNorm_ = std::max(0.68, std::sqrt((double)mx));
+    vminMs_ = std::min(1500.0, std::sqrt((double)mn) * kVelocityNorm);
+    mat_ = makeMaterial(vsq, rho, W_sim, H_sim);
+    if (glAvailable_) createModelTexture();
+}
+
+void Simulation::pushMaterial() {
+    updateCpml();
+    cpu_.setMaterial(mat_);
+    cpu_.setCpml(bx_, ax_, bz_, az_);
+    if (gpuReady) {
+        gpu_.setMaterial(mat_);
+        gpu_.setCpml(bx_, ax_, bz_, az_);
+    }
+}
+
+double Simulation::seafloorDepth(double x) const {
+    if (p.geology != GeologyModel::Imported || layout.seafloor.size() < 2)
+        return obsSeafloorDepth(p.geology, x, p.domain_W, p.domain_H);
+    const auto& s = layout.seafloor;
+    if (x <= s.front().x) return s.front().y;
+    if (x >= s.back().x) return s.back().y;
+    for (size_t k = 1; k < s.size(); k++)
+        if (x <= s[k].x) {
+            const double t = (x - s[k - 1].x) / std::max(1e-9, (double)(s[k].x - s[k - 1].x));
+            return s[k - 1].y + t * (s[k].y - s[k - 1].y);
+        }
+    return s.back().y;
+}
+
+// Velocity image of an imported model (the built-in ones are drawn as layer polygons)
+void Simulation::createModelTexture() {
+    if (modelTex) { glDeleteTextures(1, &modelTex); modelTex = 0; }
+    if (p.geology != GeologyModel::Imported || vsq.empty()) return;
+    struct Stop { float t, r, g, b; };
+    static const Stop stops[] = {{0.0f, 8, 22, 44}, {0.25f, 20, 52, 84}, {0.5f, 52, 92, 108},
+                                 {0.75f, 122, 118, 86}, {1.0f, 196, 170, 120}};
+    const double vlo = vminMs_, vhi = std::max(vminMs_ + 1.0, vmaxNorm_ * kVelocityNorm);
+    std::vector<uint32_t> px((size_t)W_sim * H_sim);
+    const int jSurf = sjSurf();
+    for (int j = 0; j < H_sim; j++)
+        for (int i = 0; i < W_sim; i++) {
+            const size_t idx = (size_t)j * W_sim + i;
+            if (j < jSurf) { px[idx] = 0; continue; }   // sky stays the scene's own
+            const double v = std::sqrt((double)vsq[idx]) * kVelocityNorm;
+            const float t = (float)std::clamp((v - vlo) / (vhi - vlo), 0.0, 1.0);
+            int k = 1;
+            while (k < 4 && t > stops[k].t) k++;
+            const Stop &a = stops[k - 1], &b = stops[k];
+            const float u = (t - a.t) / (b.t - a.t);
+            const uint32_t r = (uint32_t)(a.r + u * (b.r - a.r)), g = (uint32_t)(a.g + u * (b.g - a.g)),
+                           bl = (uint32_t)(a.b + u * (b.b - a.b));
+            px[idx] = r | g << 8 | bl << 16 | 0xFFu << 24;
+        }
+    glGenTextures(1, &modelTex);
+    glBindTexture(GL_TEXTURE_2D, modelTex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, W_sim, H_sim, 0, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+}
+
+bool Simulation::loadModel(GridModel vel, GridModel rhoModel, std::string& err) {
+    if (vel.empty()) { err = "Hız modeli boş."; return false; }
+    const double W = vel.width(), D = vel.depth();
+    if (W < 100.0 || D < 50.0) {
+        err = "Model en az 100 m genişliğinde ve 50 m derinliğinde olmalı (okunan: " + jsNum(std::round(W)) + " m x " +
+              jsNum(std::round(D)) + " m). dx ve dz değerlerini kontrol edin.";
+        return false;
+    }
+    const double H = D / (1.0 - 0.166);   // the domain keeps 16.6 % above the sea surface
+    if (W > 50000.0 || H > 20000.0) {
+        err = "Model çok büyük (" + jsNum(std::round(W)) + " m x " + jsNum(std::round(D)) +
+              " m); en fazla 50 km genişlik ve yaklaşık 16 km derinlik desteklenir.";
+        return false;
+    }
+    if (!rhoModel.empty() && (std::fabs(rhoModel.width() - W) > 0.01 * W + rhoModel.dx ||
+                              std::fabs(rhoModel.depth() - D) > 0.01 * D + rhoModel.dz)) {
+        alerts.push_back("Yoğunluk modelinin boyutu (" + jsNum(std::round(rhoModel.width())) + " m x " +
+                         jsNum(std::round(rhoModel.depth())) + " m) hız modelinden (" + jsNum(std::round(W)) + " m x " +
+                         jsNum(std::round(D)) + " m) farklı. Yoğunluk aynı fiziksel konumlardan okundu; "
+                         "eksik kalan kenarlar en yakın değerle uzatıldı.");
+    }
+    stopMode();
+    modelVel_ = std::move(vel);
+    modelRho_ = std::move(rhoModel);
+    p.geology = GeologyModel::Imported;
+    p.domain_W = (float)W;
+    p.domain_H = (float)H;
+    OCEAN_Y = p.domain_H * 0.166;
+    // Stability with the model's fastest velocity
+    const double vmaxN = std::max(0.68, modelVel_.maxValue() / kVelocityNorm);
+    const double dtMax = 1.0 / (vmaxN * std::sqrt(2.0) * cSum(p.fd_order));
+    if (p.dt > 0.95 * dtMax) {
+        const float old = p.dt;
+        p.dt = (float)(std::floor(0.9 * dtMax * 100.0) / 100.0);
+        char b[256];
+        std::snprintf(b, sizeof(b), "Modelin en yüksek hızı %.0f m/s. Kararlılık için zaman katsayısı %.2f'den %.2f'ye "
+                      "düşürüldü (sınır %.2f).", modelVel_.maxValue(), old, p.dt, dtMax);
+        alerts.push_back(b);
+    }
+    regridPending_ = false;
+    regridNow();
+    sxShip = std::clamp(sxShip, 0.0, (double)p.domain_W);
+    sxSrc = sxShip + p.src_offset;
+    return true;
+}
+
+void Simulation::clearModel() {
+    stopMode();
+    modelVel_ = GridModel{};
+    modelRho_ = GridModel{};
+    const SimParams def;
+    p.geology = GeologyModel::Flat;
+    p.domain_W = def.domain_W;
+    p.domain_H = def.domain_H;
+    OCEAN_Y = p.domain_H * 0.166;
+    regridPending_ = false;
+    regridNow();
+    sxShip = std::clamp(sxShip, 0.0, (double)p.domain_W);
+    sxSrc = sxShip + p.src_offset;
 }
 
 void Simulation::createWaveTexture() {
@@ -293,7 +463,7 @@ void Simulation::toggleComputeEngine() {
 void Simulation::toggleFreeSurface() {
     p.free_surface = !p.free_surface;
     waitInFlight(true);
-    cpmlZ(H_sim, p.npml, p.dt, OCEAN_Y, SCALE, p.free_surface, bz_, az_);
+    cpmlZ(H_sim, p.npml, p.dt, OCEAN_Y, SCALE, p.free_surface, bz_, az_, vmaxNorm_);
     cpu_.setCpmlZ(bz_, az_);
     // The HTML rewrote the GPU params here without the free-surface/geology arguments,
     // silently disabling the free surface on GPU. Both engines read the flag per batch now.
@@ -363,11 +533,10 @@ void Simulation::onSourceOffset() {
 void Simulation::onGeology() {
     waitInFlight(true);
     waitEikonal();
-    fillVsq(vsq, W_sim, H_sim, SCALE, p.geology, p.domain_W, p.domain_H);
-    layout = buildLayout(p.geology, p.domain_W, p.domain_H);
+    fillModel();
     computeObsPositions();
-    cpu_.setVsq(vsq);
-    if (gpuReady) { gpu_.setVsq(vsq); gpu_.setObs(obsX_, obsY_); }
+    pushMaterial();
+    if (gpuReady) gpu_.setObs(obsX_, obsY_);
     // Reset the wavefield to avoid instant blow-ups on layout changes over existing energy
     clearAllFields();
     if (!shots.empty()) eikDirty_ = true;
@@ -399,6 +568,10 @@ void Simulation::update(double now, double frameDt) {
         completeBatch();
     }
 
+    if (line_.active && instability) {
+        finishLine(false, "Simülasyon kararsızlaştı (sayısal patlama). Zaman katsayısını düşürüp yeniden deneyin");
+        return;
+    }
     if (mode == Mode::None || paused || instability) return;
 
     if (eikBusy_) {
@@ -412,7 +585,8 @@ void Simulation::update(double now, double frameDt) {
         submitBatch(s);
         return;
     }
-    loopIteration();
+    if (line_.active) lineIteration();
+    else loopIteration();
 }
 
 void Simulation::loopIteration() {
@@ -696,16 +870,14 @@ bool Simulation::boxFor(double t_sec, EikBox& out) const {
 bool Simulation::drawBox(EikBox& out) const { return boxFor(simTime_, out); }
 
 NumericalStatus Simulation::numericalStatus() const {
-    double c_sum = 1.0;
-    switch (p.fd_order) { case 4: c_sum = 1.166; break; case 6: c_sum = 1.241; break;
-                          case 8: c_sum = 1.28; break; case 10: c_sum = 1.31; break; }
+    const double c_sum = cSum(p.fd_order);
     int min_ppw = 12;
     switch (p.fd_order) { case 4: min_ppw = 8; break; case 6: min_ppw = 6; break;
                           case 8: min_ppw = 5; break; case 10: min_ppw = 4; break; }
     NumericalStatus s;
-    s.dt_max = 1.04 / c_sum;
+    s.dt_max = 1.0 / (vmaxNorm_ * std::sqrt(2.0) * c_sum);   // 1.04 / c_sum for the built-in models (salt 4080 m/s)
     s.cfl_ratio = p.dt / s.dt_max;
-    s.ppw = (1500.0 / p.freq) / SCALE;   // min velocity = water 1500 m/s
+    s.ppw = (vminMs_ / p.freq) / SCALE;   // slowest velocity in the model (water 1500 m/s for the built-in ones)
     s.min_ppw = min_ppw;
     return s;
 }
@@ -798,11 +970,10 @@ void Simulation::segySnapshotAndSave() {
         SegySpec s = base;
         s.traces = snapO.data(); s.nTraces = N_OBS; s.label = "OBS GATHER";
         s.sourceX = (sxShip + sxSrc) / 2;
-        const GeologyModel g = p.geology;
-        const double sp = p.obs_spacing, W = p.domain_W, H = p.domain_H;
-        s.receiver = [=](int i) {
+        const double sp = p.obs_spacing;
+        s.receiver = [this, sp](int i) {
             double rx = (i + 1) * sp;
-            return SegyReceiver{rx, 0.0, obsSeafloorDepth(g, rx, W, H)};
+            return SegyReceiver{rx, 0.0, seafloorDepth(rx)};
         };
         files.push_back({std::string("shot_") + num + "_obs.segy", buildSegy(s)});
     }
@@ -813,6 +984,147 @@ void Simulation::segySnapshotAndSave() {
         if (o) o.write((const char*)f.data.data(), (std::streamsize)f.data.size());
     }
     segyLabel_ = "🔴 Kayıt Aktif  |  " + std::to_string(sn) + ". Atış ✓";
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// Line simulation
+// ══════════════════════════════════════════════════════════════════════════
+bool Simulation::startLine(const LineSettings& s, std::string& err) {
+    if (line_.active) { err = "Bir hat simülasyonu zaten çalışıyor."; return false; }
+    if (s.nShots < 1 || s.nShots > 100000) { err = "Atış sayısı 1 ile 100000 arasında olmalı."; return false; }
+    if (!(s.interval > 0)) { err = "Atış aralığı sıfırdan büyük olmalı."; return false; }
+    const double W = W_sim > 0 ? (W_sim - 1) * SCALE : p.domain_W;
+    const double lastX = s.firstX + (s.nShots - 1) * s.interval;
+    if (s.firstX < 0 || lastX > W) {
+        char b[200];
+        std::snprintf(b, sizeof(b), "Atışlar %.1f – %.1f m arasında; modelin içinde (0 – %.0f m) kalmalı.", s.firstX, lastX, W);
+        err = b;
+        return false;
+    }
+    if (segyRecording_) segyStop(0);
+    fs::path dir = fs::u8path(s.folder) / ("SEGY_Line_" + isoStampForFolder());
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    if (ec) { err = "Klasör oluşturulamadı: " + ec.message(); return false; }
+    const std::u8string u8 = dir.u8string();
+    line_.dir.assign(u8.begin(), u8.end());
+    line_.streamer.close();
+    line_.obs.close();
+    line_.firstX = s.firstX;
+    line_.interval = s.interval;
+    line_.n = s.nShots;
+    line_.shot = 0;
+    line_.savedSpeed = p.ship_speed_knots;
+    line_.savedShipX = sxShip;
+    line_.active = true;
+    p.ship_speed_knots = 0;   // stationary during each record
+    beginLineShot();
+    return true;
+}
+
+void Simulation::cancelLine() {
+    if (!line_.active) return;
+    finishLine(true, "");   // stopped on purpose: a confirmation, not an error
+    if (!notices.empty()) notices.back() = "Hat simülasyonu durduruldu: " + std::to_string(line_.shot) + " / " +
+                                          std::to_string(line_.n) + " atış kaydedildi.\n" + line_.dir;
+}
+
+double Simulation::lineProgress() const {
+    if (!line_.active || line_.n <= 0) return 0.0;
+    const double T = std::max(1.0, sismoSteps());
+    return std::clamp((line_.shot + std::min(1.0, cycle_t / T)) / line_.n, 0.0, 1.0);
+}
+
+void Simulation::beginLineShot() {
+    const double srcX = line_.firstX + line_.shot * line_.interval;
+    waitInFlight(false);
+    sxShip = srcX + p.ship_src_dist;   // the source hangs ship_src_dist behind the ship
+    sxSrc = sxShip + p.src_offset;
+    startMode(Mode::Trad);             // quiet wavefield, empty sismogram, fires the shot
+}
+
+void Simulation::lineIteration() {
+    const double T = sismoSteps();
+    if (cycle_t >= T) {   // record complete (the last batch has been applied)
+        std::string err;
+        if (!appendLineShot(err)) { finishLine(false, err); return; }
+        line_.shot++;
+        if (line_.shot >= line_.n) { finishLine(true, ""); return; }
+        beginLineShot();
+        return;
+    }
+    const int steps = (int)std::clamp(T - cycle_t, 1.0, (double)MAX_STEPS);
+    if (eikDirty_) {
+        startEikonal();
+        if (eikBusy_) { pendingSteps_ = steps; return; }
+    }
+    submitBatch(steps);
+}
+
+bool Simulation::appendLineShot(std::string& err) {
+    const int sn = line_.shot + 1;
+    const int targetSamples = std::max(1, p.sismo_ms);   // 1.0 ms sample rate, as the live export
+    const int ns = sismoSamples();
+    auto snap1 = resampleGather(sismo.data(), 0, N_REC, kSismoStride, ns, targetSamples);
+
+    SegySpec base;
+    base.nSamples = targetSamples; base.dtMicros = 1000; base.shotNum = sn; base.modeLabel = "LINE";
+    base.sourceDepth = p.source_depth; base.fd_order = p.fd_order; base.freq = p.freq; base.SCALE = SCALE;
+    base.domainW = p.domain_W; base.domainH = p.domain_H; base.oceanY = OCEAN_Y; base.geology = geoUpper(p.geology);
+    base.sourceX = sxShip - p.ship_src_dist;
+
+    char note[160];
+    std::snprintf(note, sizeof(note), "%d SHOTS  FIRST SOURCE X %.1fm  INTERVAL %.2fm", line_.n, line_.firstX, line_.interval);
+    const std::string base_dir = line_.dir;
+
+    {   // streamer
+        const double head_x = sxShip - p.ship_src_dist - p.src_rec_dist;
+        const double cable = p.cable_len, tail = p.cable_tail_depth, headD = p.cable_head_depth;
+        const int nrec = N_REC;
+        SegySpec s = base;
+        s.traces = snap1.data(); s.nTraces = N_REC; s.label = "STREAMER";
+        s.receiver = [=](int i) {
+            double n = nrec > 1 ? (double)i / (nrec - 1) : 0.0;
+            return SegyReceiver{head_x - cable + i * (nrec > 1 ? cable / (nrec - 1) : 0.0), 0.0, tail + (headD - tail) * n};
+        };
+        if (!line_.streamer.isOpen()) {
+            const std::u8string u = (fs::u8path(base_dir) / "line_streamer.segy").u8string();
+            if (!line_.streamer.open(std::string(u.begin(), u.end()), s, note, err)) return false;
+        }
+        if (!line_.streamer.append(s, err)) return false;
+    }
+    if (p.obs_enabled && N_OBS > 0) {
+        auto snapO = resampleGather(sismo.data(), (size_t)N_REC * 2 * kSismoStride, N_OBS, kSismoStride, ns, targetSamples);
+        SegySpec s = base;
+        s.traces = snapO.data(); s.nTraces = N_OBS; s.label = "OBS";
+        const double sp = p.obs_spacing;
+        s.receiver = [this, sp](int i) {
+            double rx = (i + 1) * sp;
+            return SegyReceiver{rx, 0.0, seafloorDepth(rx)};
+        };
+        if (!line_.obs.isOpen()) {
+            const std::u8string u = (fs::u8path(base_dir) / "line_obs.segy").u8string();
+            if (!line_.obs.open(std::string(u.begin(), u.end()), s, note, err)) return false;
+        }
+        if (!line_.obs.append(s, err)) return false;
+    }
+    return true;
+}
+
+void Simulation::finishLine(bool ok, const std::string& why) {
+    line_.streamer.close();
+    line_.obs.close();
+    line_.active = false;
+    const int done = line_.shot;
+    stopMode();
+    p.ship_speed_knots = line_.savedSpeed;
+    sxShip = line_.savedShipX;
+    sxSrc = sxShip + p.src_offset;
+    if (ok)
+        notices.push_back("Hat simülasyonu tamamlandı: " + std::to_string(done) + " atış kaydedildi.\n" + line_.dir);
+    else
+        alerts.push_back("Hat simülasyonu durdu: " + why + ".\n" + std::to_string(done) + " / " + std::to_string(line_.n) +
+                         " atış kaydedildi: " + line_.dir);
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -850,6 +1162,17 @@ bool Simulation::applyConfigJson(const std::string& text, std::string& err) {
 
     stopMode();
     p = np;
+    if (p.geology == GeologyModel::Imported) {
+        if (hasModel()) {   // the domain is the loaded model's
+            p.domain_W = (float)modelVel_.width();
+            p.domain_H = (float)(modelVel_.depth() / (1.0 - 0.166));
+        } else {
+            p.geology = GeologyModel::Flat;
+            alerts.push_back("Bu parametre dosyası dosyadan yüklenen bir model kullanıyor; model dosyaları parametrelerle "
+                             "birlikte saklanmaz. Hız (ve yoğunluk) modelini Jeoloji sekmesinden yeniden yükleyin. "
+                             "Şimdilik düz katman modeli kullanılıyor.");
+        }
+    }
     OCEAN_Y = p.domain_H * 0.166;
     regridPending_ = false;
     regridNow();
