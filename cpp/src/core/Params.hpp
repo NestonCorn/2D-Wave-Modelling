@@ -37,7 +37,7 @@ struct SimParams {
     float ship_src_dist = 50.0f;     // sl_shipSrc 0..300
     float src_rec_dist = 100.0f;     // sl_srcRec 0..500
     float ship_speed_knots = 4.5f;   // sl_shipSpeed 0..12
-    float shot_interval = 25.0f;     // sl_shot 6.25..100
+    float shot_interval = 25.0f;     // sl_shot 6.25..1000 (also the line simulation's shot spacing)
 
     // ── Jeoloji & OBS ──
     GeologyModel geology = GeologyModel::Salt;

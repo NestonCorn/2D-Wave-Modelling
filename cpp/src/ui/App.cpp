@@ -33,10 +33,13 @@ std::string baseName(const std::string& path) {
     return std::string(u.begin(), u.end());
 }
 
-void caption(const char* text) {   // small heading inside a section
-    ImGui::Dummy(ImVec2(0, S(2)));
-    ImGui::PushFont(fonts.label);
-    ImGui::PushStyleColor(ImGuiCol_Text, vec(col::muted));
+void caption(const char* text) {   // heading of a block inside a group, a rule above it
+    ImGui::Dummy(ImVec2(0, S(6)));
+    const ImVec2 q = ImGui::GetCursorScreenPos();
+    ImGui::GetWindowDrawList()->AddLine(q, ImVec2(q.x + ImGui::GetContentRegionAvail().x, q.y), col::rail);
+    ImGui::Dummy(ImVec2(0, S(8)));
+    ImGui::PushFont(fonts.subhead);
+    ImGui::PushStyleColor(ImGuiCol_Text, vec(col::textHi));
     ImGui::TextUnformatted(text);
     ImGui::PopStyleColor();
     ImGui::PopFont();
@@ -74,27 +77,32 @@ void App::frame(double now) {
                      ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoSavedSettings);
     const ImVec2 o = ImGui::GetWindowPos();
     const float W = vp->WorkSize.x, H = vp->WorkSize.y;
-    const float titleH = S(40), cmdH = S(52), statusH = S(28);
+    const float titleH = S(44), cmdH = S(60), statusH = S(30);
     const float bodyY = o.y + titleH + cmdH;
     const float bodyH = std::max(S(240), H - titleH - cmdH - statusH);
-    sideW_ = std::clamp(sideW_, 280.0f, std::max(280.0f, std::min(560.0f, W / dpi * 0.45f)));
-    const float sw = S(sideW_), gutter = S(5);
+    sideW_ = std::clamp(sideW_, 300.0f, std::max(300.0f, std::min(560.0f, W / dpi * 0.4f)));
+    const float railW = S(56);
+    const float sw = panelOpen_ ? S(sideW_) : 0.0f, gutter = panelOpen_ ? S(5) : 0.0f;
 
     titleBar(o, ImVec2(W, titleH));
     commandBar(ImVec2(o.x, o.y + titleH), ImVec2(W, cmdH));
-    sidePanel(ImVec2(o.x, bodyY), ImVec2(sw, bodyH), now);
-    {   // panel / views splitter
-        ImGui::SetCursorScreenPos(ImVec2(o.x + sw, bodyY));
+    iconRail(ImVec2(o.x, bodyY), ImVec2(railW, bodyH));
+    if (panelOpen_) {
+        sidePanel(ImVec2(o.x + railW, bodyY), ImVec2(sw, bodyH), now);
+        // panel / views splitter
+        const float sx = o.x + railW + sw;
+        ImGui::SetCursorScreenPos(ImVec2(sx, bodyY));
         ImGui::InvisibleButton("##sideSplit", ImVec2(gutter, bodyH));
         const bool hov = ImGui::IsItemHovered(), act = ImGui::IsItemActive();
         if (hov || act) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
         if (act) sideW_ += ImGui::GetIO().MouseDelta.x / dpi;
         ImDrawList* dl = ImGui::GetWindowDrawList();
-        dl->AddRectFilled(ImVec2(o.x + sw, bodyY), ImVec2(o.x + sw + gutter, bodyY + bodyH), col::abyss);
-        dl->AddLine(ImVec2(o.x + sw + gutter * 0.5f, bodyY), ImVec2(o.x + sw + gutter * 0.5f, bodyY + bodyH),
+        dl->AddRectFilled(ImVec2(sx, bodyY), ImVec2(sx + gutter, bodyY + bodyH), col::abyss);
+        dl->AddLine(ImVec2(sx + gutter * 0.5f, bodyY), ImVec2(sx + gutter * 0.5f, bodyY + bodyH),
                     act ? col::accent : hov ? col::rail : col::bulkhead, act || hov ? S(2) : 1.0f);
     }
-    views(ImVec2(o.x + sw + gutter, bodyY), ImVec2(W - sw - gutter, bodyH));
+    const float vx = o.x + railW + sw + gutter;
+    views(ImVec2(vx, bodyY), ImVec2(o.x + W - vx, bodyH));
     statusBar(ImVec2(o.x, bodyY + bodyH), ImVec2(W, statusH));
     toasts(ImVec2(o.x + W - S(16), bodyY + bodyH - S(14)));
 
@@ -116,6 +124,11 @@ void App::keyboard() {
     if (io.WantTextInput || ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId)) return;
     // Keyboard actions are instant: no animation on anything they trigger
     if (ImGui::IsKeyPressed(ImGuiKey_Space, false)) startOrPause();
+    if (io.KeyCtrl) {
+        if (ImGui::IsKeyPressed(ImGuiKey_1, false)) view_ = 0;
+        if (ImGui::IsKeyPressed(ImGuiKey_2, false)) view_ = 1;
+        if (ImGui::IsKeyPressed(ImGuiKey_3, false)) view_ = 2;
+    }
 }
 
 void App::startOrPause() {
@@ -179,11 +192,11 @@ void App::commandBar(ImVec2 o, ImVec2 size) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(o, ImVec2(o.x + size.x, o.y + size.y), col::hull);
     dl->AddLine(ImVec2(o.x, o.y + size.y - 1), ImVec2(o.x + size.x, o.y + size.y - 1), col::bulkhead);
-    const float bh = S(30), y = o.y + (size.y - bh) * 0.5f, gap = S(10);
-    float x = o.x + S(16);
+    const float bh = S(36), y = o.y + (size.y - bh) * 0.5f, gap = S(12);
+    float x = o.x + S(20);
     auto at = [&](float px) { ImGui::SetCursorScreenPos(ImVec2(px, y)); };
     auto next = [&](float extra = 0) { x = ImGui::GetItemRectMax().x + gap + extra; };
-    auto rule = [&]() { vrule(dl, x + S(4), y + S(4), y + bh - S(4)); x += S(18); };
+    auto rule = [&]() { vrule(dl, x + S(8), y + S(6), y + bh - S(6)); x += S(28); };
 
     if (sim_.lineActive()) {
         // A line simulation drives the modes and the ship: its progress replaces the controls
@@ -220,7 +233,7 @@ void App::commandBar(ImVec2 o, ImVec2 size) {
                                      "Eşzamanlı atış: iki kaynak aynı kayıtta (karışık veri).",
                                      "Ardışık atış: önce ana gemi, sonra kaynak gemisi."};
     at(x);
-    if (Segmented("##mode", modes, 3, &cur, S(270), modeTips)) {
+    if (Segmented("##mode", modes, 3, &cur, S(300), modeTips, bh)) {
         selMode_ = cur;
         if (running) sim_.startMode(modeOf(cur));
     }
@@ -245,7 +258,7 @@ void App::commandBar(ImVec2 o, ImVec2 size) {
         dl->AddText(ImVec2(x, y + (bh - ts.y) * 0.5f), col::text, lbl);
         x += ts.x + S(8);
         ImGui::SetCursorScreenPos(ImVec2(x, y + (bh - ImGui::GetFrameHeight()) * 0.5f));
-        ImGui::SetNextItemWidth(S(64));
+        ImGui::SetNextItemWidth(S(72));
         ImGui::PushFont(fonts.mono);
         ImGui::PushStyleColor(ImGuiCol_Text, vec(col::textHi));
         int ms = sim_.p.sismo_ms;
@@ -270,7 +283,7 @@ void App::toggleSegy() {
     else std::snprintf(lbl, sizeof(lbl), "  SEG-Y'ye kaydet###segy");
     const bool idle = sim_.mode == Mode::None;
     ImGui::BeginDisabled(!rec && idle);
-    const bool clicked = ToolButton(lbl, rec ? Btn::Danger : Btn::Secondary, ImVec2(0, S(30)),
+    const bool clicked = ToolButton(lbl, rec ? Btn::Danger : Btn::Secondary, ImVec2(0, S(36)),
                                     idle && !rec ? "Önce bir kip başlatın; her atış kayıt uzunluğuna ulaştığında ayrı SEG-Y dosyalarına yazılır."
                                                  : "Her atış kayıt uzunluğuna ulaştığında streamer ve OBS kayıtlarını ayrı SEG-Y dosyalarına yazar.");
     ImGui::EndDisabled();
@@ -285,35 +298,129 @@ void App::toggleSegy() {
     if (!dir.empty()) sim_.segyStart(dir);
 }
 
-// ── Parameter panel ───────────────────────────────────────────────────────
+// ── Parameter groups: icon rail + one group at a time ──────────────────────
+namespace {
+struct GroupInfo { const char* icon; const char* name; const char* blurb; };
+// Segoe Fluent / MDL2 glyphs
+const GroupInfo kGroups[] = {
+    {"", "Kaynak ve dalgacık", "Kaynağın yaydığı darbe"},
+    {"", "Ortam ve yeraltı modeli", "Hız, yoğunluk ve alan boyutu"},
+    {"", "Saha geometrisi", "Kablo, alıcılar ve gemiler"},
+    {"", "Deniz tabanı alıcıları (OBS)", "Deniz tabanına yerleşen alıcılar"},
+    {"", "Sayısal çözüm", "Izgara, zaman adımı ve kararlılık"},
+    {"", "Görünüm", "Kazanç ve oynatma hızı"},
+    {"", "Hat simülasyonu", "Bir hattın bütün atışlarını SEG-Y'ye yazar"},
+    {"", "Parametre dosyası", "Ayarları kaydet ve aç"},
+};
+constexpr int kGroupCount = (int)(sizeof(kGroups) / sizeof(kGroups[0]));
+} // namespace
+
+void App::iconRail(ImVec2 o, ImVec2 size) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(o, ImVec2(o.x + size.x, o.y + size.y), col::hull);
+    dl->AddLine(ImVec2(o.x + size.x - 1, o.y), ImVec2(o.x + size.x - 1, o.y + size.y), col::bulkhead);
+    const float cell = S(48), btn = S(40);
+    const float bx = o.x + (size.x - btn) * 0.5f;
+    // The accent bar slides to the selected group (interruptible ease-out)
+    const float barY = Animate(ImGui::GetID("##railBar"), o.y + S(10) + group_ * cell, 180);
+    for (int i = 0; i < kGroupCount; i++) {
+        const ImVec2 a(bx, o.y + S(10) + i * cell), b(a.x + btn, a.y + btn);
+        ImGui::SetCursorScreenPos(a);
+        ImGui::PushID(i);
+        const bool clicked = ImGui::InvisibleButton("##grp", ImVec2(btn, btn));
+        ImGui::PopID();
+        const bool hov = ImGui::IsItemHovered(), held = ImGui::IsItemActive();
+        const bool sel = i == group_ && panelOpen_;
+        if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        char tip[160];
+        std::snprintf(tip, sizeof(tip), "%s\n%s", kGroups[i].name, sel ? "Tıklayınca panel gizlenir." : kGroups[i].blurb);
+        Tip(tip);
+        if (clicked) {
+            if (sel) panelOpen_ = false;
+            else { group_ = i; panelOpen_ = true; }
+        }
+        const float in = held ? S(1) : 0.0f;   // pressed: shrinks a little
+        const ImVec2 A(a.x + in, a.y + in), B(b.x - in, b.y - in);
+        if (sel) dl->AddRectFilled(A, B, col::deck, S(6));
+        else if (hov) dl->AddRectFilled(A, B, withAlpha(col::deck, 0.6f), S(6));
+        const float fs = S(19);
+        const ImVec2 ts = fonts.icon->CalcTextSizeA(fs, FLT_MAX, 0, kGroups[i].icon);
+        dl->AddText(fonts.icon, fs, ImVec2(a.x + (btn - ts.x) * 0.5f, a.y + (btn - ts.y) * 0.5f),
+                    sel ? col::textHi : hov ? col::text : col::muted, kGroups[i].icon);
+    }
+    if (panelOpen_)
+        dl->AddRectFilled(ImVec2(o.x, barY + S(9)), ImVec2(o.x + S(3), barY + btn - S(9)), col::accent, S(1.5f));
+}
+
 void App::sidePanel(ImVec2 o, ImVec2 size, double now) {
-    ImGui::GetWindowDrawList()->AddRectFilled(o, ImVec2(o.x + size.x, o.y + size.y), col::hull);
-    ImGui::SetCursorScreenPos(o);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(16), S(2)));
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(S(8), S(4)));
-    ImGui::BeginChild("##side", size, ImGuiChildFlags_AlwaysUseWindowPadding);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(o, ImVec2(o.x + size.x, o.y + size.y), col::hull);
+    // Group header
+    const GroupInfo& g = kGroups[std::clamp(group_, 0, kGroupCount - 1)];
+    const float hH = S(80), px = S(22);
+    dl->AddText(fonts.heading, fonts.heading->FontSize, ImVec2(o.x + px, o.y + S(13)), col::textHi, g.name);
+    dl->AddText(fonts.ui, fonts.ui->FontSize, ImVec2(o.x + px, o.y + S(13) + fonts.heading->FontSize + S(4)), col::muted, g.blurb);
+    dl->AddLine(ImVec2(o.x, o.y + hH), ImVec2(o.x + size.x, o.y + hH), col::bulkhead);
+
+    ImGui::SetCursorScreenPos(ImVec2(o.x, o.y + hH + 1));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(px, S(18)));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(S(8), S(8)));
+    ImGui::BeginChild("##side", ImVec2(size.x, size.y - hH - 1), ImGuiChildFlags_AlwaysUseWindowPadding);
     ImGui::BeginDisabled(sim_.lineActive());
-    sectionSource();
-    sectionMedium(now);
-    sectionGeometry();
-    sectionObs();
-    sectionNumerics(now);
-    sectionView();
-    sectionLine();
-    sectionFiles();
-    sectionCpu();
+    switch (group_) {
+        case 0: sectionSource(); break;
+        case 1: sectionMedium(now); break;
+        case 2: sectionGeometry(); break;
+        case 3: sectionObs(); break;
+        case 4: sectionNumerics(now); sectionCpu(); break;
+        case 5: sectionView(); break;
+        case 6: sectionLine(); break;
+        default: sectionFiles(); break;
+    }
     ImGui::EndDisabled();
-    // closing hairline under the last section
-    const ImVec2 p = ImGui::GetCursorScreenPos();
-    ImGui::GetWindowDrawList()->AddLine(ImVec2(p.x - S(16), p.y), ImVec2(p.x + ImGui::GetContentRegionAvail().x + S(16), p.y), col::bulkhead);
-    ImGui::Dummy(ImVec2(0, S(16)));
+    ImGui::Dummy(ImVec2(0, S(12)));
     ImGui::EndChild();
     ImGui::PopStyleVar(2);
 }
 
+// ── View tabs ─────────────────────────────────────────────────────────────
+void App::viewTabs(ImVec2 o, ImVec2 size) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(o, ImVec2(o.x + size.x, o.y + size.y), col::hull);
+    dl->AddLine(ImVec2(o.x, o.y + size.y - 1), ImVec2(o.x + size.x, o.y + size.y - 1), col::bulkhead);
+    static const char* names[] = {"Model", "Kayıtlar", "Yan yana"};
+    static const char* tips[] = {"Model ve dalga alanı bütün alanı kaplar.", "Streamer ve OBS kayıtları bütün alanı kaplar.",
+                                 "Model üstte, kayıtlar altta."};
+    ImFont* f = fonts.subhead;
+    float x = o.x + S(10);
+    float ux0 = 0, ux1 = 0;
+    for (int i = 0; i < 3; i++) {
+        const ImVec2 ts = f->CalcTextSizeA(f->FontSize, FLT_MAX, 0, names[i]);
+        const float w = ts.x + S(32);
+        ImGui::SetCursorScreenPos(ImVec2(x, o.y));
+        ImGui::PushID(i);
+        if (ImGui::InvisibleButton("##view", ImVec2(w, size.y - 1))) view_ = i;
+        ImGui::PopID();
+        Tip(tips[i]);
+        const bool hov = ImGui::IsItemHovered(), sel = view_ == i;
+        if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        dl->AddText(f, f->FontSize, ImVec2(x + S(16), o.y + (size.y - ts.y) * 0.5f), sel ? col::textHi : hov ? col::text : col::muted,
+                    names[i]);
+        if (sel) { ux0 = x + S(10); ux1 = x + w - S(10); }
+        x += w;
+    }
+    // Underline glides between tabs
+    const float a0 = Animate(ImGui::GetID("##tabU0"), ux0, 160), a1 = Animate(ImGui::GetID("##tabU1"), ux1, 160);
+    dl->AddRectFilled(ImVec2(a0, o.y + size.y - S(3)), ImVec2(a1, o.y + size.y - 1), col::accent, S(1));
+    // Keyboard hint on the right
+    const char* hint = "Ctrl+1 / 2 / 3";
+    const ImVec2 hs = fonts.mono->CalcTextSizeA(fonts.mono->FontSize, FLT_MAX, 0, hint);
+    if (o.x + size.x - S(16) - hs.x > x + S(20))
+        dl->AddText(fonts.mono, fonts.mono->FontSize, ImVec2(o.x + size.x - S(16) - hs.x, o.y + (size.y - hs.y) * 0.5f), col::muted, hint);
+}
+
 void App::sectionSource() {
     SimParams& p = sim_.p;
-    if (!Section("Kaynak ve dalgacık", true)) return;
     static const char* wav[] = {"Ricker (sıfır faz)", "Minimum faz", "Gauss", "Gauss 1. türevi"};
     int w = (int)p.wavelet;
     if (ComboRow("Dalgacık", "##wavelet", &w, wav, 4, S(170))) p.wavelet = (Wavelet)w;
@@ -325,7 +432,6 @@ void App::sectionSource() {
 
 void App::sectionMedium(double now) {
     SimParams& p = sim_.p;
-    if (!Section("Ortam ve yeraltı modeli", true)) return;
     static const char* models[] = {"Düz katmanlar", "Fay", "Tuz domu", "Dosyadan yüklenen"};
     int g = (int)p.geology;
     if (ComboRow("Hız modeli", "##geoModel", &g, models, sim_.hasModel() ? 4 : 3, S(170))) {
@@ -409,7 +515,6 @@ void App::sectionMedium(double now) {
 
 void App::sectionGeometry() {
     SimParams& p = sim_.p;
-    if (!Section("Saha geometrisi", true)) return;
     if (ParamRow("Kablo boyu (m)", "cable", &p.cable_len, 50, 1500, 10, "%.0f")) sim_.onCableLen();
     {
         static const char* sp[] = {"3.125 m", "6.25 m", "12.5 m", "25 m", "50 m", "100 m"};
@@ -436,13 +541,13 @@ void App::sectionGeometry() {
     ParamRow("Gemi – kaynak (m)", "shipSrc", &p.ship_src_dist, 0, 300, 10, "%.0f");
     ParamRow("Kaynak – ilk alıcı (m)", "srcRec", &p.src_rec_dist, 0, 500, 10, "%.0f");
     ParamRow("Gemi hızı (knot)", "speed", &p.ship_speed_knots, 0, 12, 0.5f, "%.1f");
-    ParamRow("Atış aralığı (m)", "shot", &p.shot_interval, 6.25f, 100, 6.25f, "%.2f");
+    ParamRow("Atış aralığı (m)", "shot", &p.shot_interval, 6.25f, 1000, 6.25f, "%.2f");
+    Tip("Ardışık atışlar arasındaki uzaklık. Hat simülasyonu da bu aralığı kullanır.");
     ImGui::Dummy(ImVec2(0, S(4)));
 }
 
 void App::sectionObs() {
     SimParams& p = sim_.p;
-    if (!Section("Deniz tabanı alıcıları (OBS)", true)) return;
     bool on = p.obs_enabled;
     if (Switch("OBS kaydı", &on, "Deniz tabanına eşit aralıklarla yerleşen alıcılar; kayıtları sağdaki panelde.")) sim_.toggleObs();
     if (ParamRow("OBS aralığı (m)", "obsSp", &p.obs_spacing, 50, 500, 10, "%.0f")) pendingObs_ = true;
@@ -454,7 +559,6 @@ void App::sectionObs() {
 
 void App::sectionNumerics(double now) {
     SimParams& p = sim_.p;
-    if (!Section("Sayısal çözüm", false)) return;
     static const char* orders[] = {"2. derece", "4. derece", "6. derece", "8. derece", "10. derece"};
     int idx = p.fd_order / 2 - 1;
     if (ComboRow("Türev derecesi", "##fdOrder", &idx, orders, 5, S(130))) { p.fd_order = (idx + 1) * 2; sim_.onFdOrder(); }
@@ -472,7 +576,7 @@ void App::sectionNumerics(double now) {
     std::snprintf(b, sizeof(b), "%%%d", (int)std::lround(ns.cfl_ratio * 100));
     ReadoutRow("CFL oranı", b, levelColor(cflLevel));
     Tip("Zaman adımının kararlılık sınırına oranı. %100'ü aşarsa simülasyon patlar.");
-    std::snprintf(b, sizeof(b), "≤ %.2f", ns.dt_max);
+    std::snprintf(b, sizeof(b), "en fazla %.2f", ns.dt_max);
     ReadoutRow("Zaman katsayısı sınırı", b);
     const int pLevel = ns.ppw >= ns.min_ppw * 1.5 ? 0 : ns.ppw >= ns.min_ppw ? 1 : 2;
     std::snprintf(b, sizeof(b), "%.1f (en az %d)", ns.ppw, ns.min_ppw);
@@ -483,7 +587,6 @@ void App::sectionNumerics(double now) {
 
 void App::sectionView() {
     SimParams& p = sim_.p;
-    if (!Section("Görünüm", true)) return;
     ParamRow("Görsel kazanç", "gain", &p.gain, 1, 100, 1, "%.0f");
     ParamRow("Kare başına ilerleme (ms)", "spd", &p.speed_ms, 1, 250, 0.5f, "%.1f");
     Tip("Her ekran karesinde simüle edilen süre. Büyüdükçe simülasyon gerçek zamandan hızlı akar.");
@@ -495,50 +598,139 @@ void App::sectionView() {
 
 void App::sectionLine() {
     SimParams& p = sim_.p;
-    if (!Section("Hat simülasyonu", false)) return;
+    const bool active = sim_.lineActive();
     const float W = (float)((sim_.W_sim - 1) * sim_.SCALE);
-    if (lineFirstX_ < 0) lineFirstX_ = std::min(W, p.src_rec_dist + p.cable_len);   // whole cable inside
-    lineFirstX_ = std::clamp(lineFirstX_, 0.0f, W);
-    ParamRow("İlk atış konumu X (m)", "lnX", &lineFirstX_, 0, W, 5, "%.0f");
+    const Mode lineMode = active ? sim_.lineMode() : modeOf(selMode_);
+    const bool twoShips = lineMode != Mode::Trad;
+
+    // Everything but the shot count comes from the other groups: the first shot is the main
+    // source as placed now (ship position minus ship - source), the spacing is the shot interval
+    const float firstX = active ? (float)sim_.lineFirstX() : (float)(sim_.sxShip - p.ship_src_dist);
     ParamRowInt("Atış sayısı", "lnN", &lineShots_, 1, 2000, 1);
-    ParamRow("Atış aralığı (m)", "lnDx", &lineInterval_, 1, 1000, 0.5f, "%.2f");
-    const double lastX = lineFirstX_ + (lineShots_ - 1) * (double)lineInterval_;
-    char b[96];
-    std::snprintf(b, sizeof(b), "%.0f m", lastX);
-    ReadoutRow("Son atış konumu", b);
-    std::snprintf(b, sizeof(b), "%d ms, 1 ms örnek", p.sismo_ms);
-    ReadoutRow("Kayıt", b);
-    if (p.obs_enabled) std::snprintf(b, sizeof(b), "streamer %d, OBS %d", sim_.N_REC, sim_.N_OBS);
-    else std::snprintf(b, sizeof(b), "streamer %d", sim_.N_REC);
-    ReadoutRow("Kanal", b);
-    const double tailX = lineFirstX_ - p.src_rec_dist - p.cable_len;
-    const bool outside = lastX > W;
-    if (outside) {
+    Hint("İlk atış ana kaynağın şu anki konumunda (Saha geometrisi → Ana gemi konumu); atışlar arası uzaklık Saha "
+         "geometrisindeki atış aralığı.");
+    const double lastX = firstX + (lineShots_ - 1) * (double)p.shot_interval;
+    const double tailX = firstX - p.src_rec_dist - p.cable_len;
+    const double srcLastX = lastX + (twoShips ? p.src_offset : 0.0);
+    const bool outside = lastX > W || srcLastX > W;
+    char b[160];
+    if (lastX > W) {
         std::snprintf(b, sizeof(b), "Son atışlar modelin dışında (model %.0f m genişliğinde).", W);
+        Hint(b, col::danger);
+    } else if (srcLastX > W) {
+        std::snprintf(b, sizeof(b), "Kaynak gemisi son atışlarda %.0f m'de, modelin dışında (model %.0f m). Atış sayısını ya da "
+                      "kaynak gemisi uzaklığını azaltın.", srcLastX, W);
         Hint(b, col::danger);
     } else if (tailX < 0) {
         std::snprintf(b, sizeof(b), "İlk atışlarda kablonun %.0f m'si modelin dışında; o kanallar boş kaydedilir.", -tailX);
         Hint(b, col::warn);
     }
-    Hint("Her atış sessiz dalga alanından başlar, gemi atış boyunca sabittir ve tek kaynak kullanılır. Atışlar "
-         "line_streamer.segy ve line_obs.segy dosyalarına eklenir.");
     const float w = ImGui::GetContentRegionAvail().x;
     ImGui::BeginDisabled(outside);
-    if (ToolButton("  Hattı simüle et ve kaydet…", Btn::Secondary, ImVec2(w, 0))) {
+    if (ToolButton("  Hattı simüle et ve kaydet…", Btn::Secondary, ImVec2(w, 0))) {
         std::string dir = pfd::select_folder("Hat SEG-Y dosyalarının kaydedileceği klasörü seçin").result();
         if (!dir.empty()) {
             Simulation::LineSettings ls;
-            ls.firstX = lineFirstX_; ls.nShots = lineShots_; ls.interval = lineInterval_; ls.folder = dir;
+            ls.firstX = firstX; ls.nShots = lineShots_; ls.interval = p.shot_interval; ls.mode = lineMode; ls.folder = dir;
             std::string err;
             if (!sim_.startLine(ls, err)) alert(err);
         }
     }
     ImGui::EndDisabled();
+
+    // ── What the line will run with: every setting it takes from the other groups ──
+    ImGui::Dummy(ImVec2(0, S(6)));
+    {
+        const ImVec2 q = ImGui::GetCursorScreenPos();
+        ImGui::GetWindowDrawList()->AddLine(ImVec2(q.x, q.y), ImVec2(q.x + w, q.y), col::bulkhead);
+        ImGui::Dummy(ImVec2(0, S(4)));
+    }
+    ImGui::PushFont(fonts.heading);
+    ImGui::TextColored(vec(col::textHi), "Hattın ayarları");
+    ImGui::PopFont();
+    Hint("Hat, öteki gruplardaki bu değerlerle çalışır.");
+
+    caption("Hat");
+    static const char* modeNames[] = {"Geleneksel", "SLO (eşzamanlı)", "CLO (ardışık)"};
+    ReadoutRow("Atış kipi", modeNames[indexOf(lineMode)]);
+    Tip("Komut çubuğunda seçili kip. SLO'da kaynak gemisi 25 adım sonra aynı kayda atar; CLO'da ana kayıt bitince "
+        "kaynak gemisi atar ve ikinci bir kayıt alınır.");
+    std::snprintf(b, sizeof(b), "%.0f – %.0f m", firstX, lastX);
+    ReadoutRow("Atış konumları", b);
+    std::snprintf(b, sizeof(b), "%.2f m", p.shot_interval);
+    ReadoutRow("Atış aralığı", b);
+    std::snprintf(b, sizeof(b), "%.0f m", lastX - firstX);
+    ReadoutRow("Hat uzunluğu", b);
+    std::snprintf(b, sizeof(b), "%.1f knot", p.ship_speed_knots);
+    ReadoutRow("Gemi hızı", b);
+    {
+        const double recSec = p.sismo_ms / 1000.0 * (lineMode == Mode::CLO ? 2.0 : 1.0);
+        std::snprintf(b, sizeof(b), "Gemi her kayıt boyunca %.1f m ilerler; kaynak attığı yerde kalır, kablo gemiyle gider.",
+                      p.ship_speed_knots * 0.514444 * recSec);
+        if (p.ship_speed_knots > 0) Hint(b);
+    }
+    if (twoShips) {
+        std::snprintf(b, sizeof(b), "%.0f m önde", p.src_offset);
+        ReadoutRow("Kaynak gemisi", b);
+    }
+
+    caption("Kayıt");
+    std::snprintf(b, sizeof(b), "%d ms, 1 ms örnek", p.sismo_ms);
+    ReadoutRow("Uzunluk", b);
+    if (p.obs_enabled) std::snprintf(b, sizeof(b), "streamer %d, OBS %d", sim_.N_REC, sim_.N_OBS);
+    else std::snprintf(b, sizeof(b), "streamer %d", sim_.N_REC);
+    ReadoutRow("Kanal", b);
+    std::string files = "line_streamer.segy";
+    if (lineMode == Mode::CLO) files += ", line_streamer_src.segy";
+    if (p.obs_enabled) files += ", line_obs.segy";
+    Hint(files.c_str(), col::text);
+
+    caption("Kaynak");
+    static const char* wav[] = {"Ricker", "Minimum faz", "Gauss", "Gauss 1. türevi"};
+    std::snprintf(b, sizeof(b), "%s, %.1f Hz", wav[std::clamp((int)p.wavelet, 0, 3)], p.freq);
+    ReadoutRow("Dalgacık", b);
+    std::snprintf(b, sizeof(b), "%.1f", p.amp);
+    ReadoutRow("Genlik", b);
+    std::snprintf(b, sizeof(b), "%.0f m", p.source_depth);
+    ReadoutRow("Derinlik", b);
+
+    caption("Geometri");
+    std::snprintf(b, sizeof(b), "%.0f m, %g m aralık", p.cable_len, p.receiver_spacing);
+    ReadoutRow("Kablo", b);
+    std::snprintf(b, sizeof(b), "%.0f → %.0f m", p.cable_head_depth, p.cable_tail_depth);
+    ReadoutRow("Kablo derinliği (baş → son)", b);
+    std::snprintf(b, sizeof(b), "%.0f – %.0f m", p.src_rec_dist, p.src_rec_dist + p.cable_len);
+    ReadoutRow("Ofset (yakın – uzak)", b);
+    std::snprintf(b, sizeof(b), "%.0f m", p.ship_src_dist);
+    ReadoutRow("Gemi – kaynak", b);
+    if (p.obs_enabled) {
+        std::snprintf(b, sizeof(b), "%d, %.0f m aralık", sim_.N_OBS, p.obs_spacing);
+        ReadoutRow("OBS", b);
+    }
+
+    caption("Model ve sayısal çözüm");
+    static const char* models[] = {"Düz katmanlar", "Fay", "Tuz domu", "Dosyadan"};
+    std::string model = models[std::clamp((int)p.geology, 0, 3)];
+    if (p.geology == GeologyModel::Imported && sim_.hasModel()) model = sim_.modelVelocity().source;
+    ReadoutRow("Hız modeli", model.c_str());
+    std::snprintf(b, sizeof(b), "%.0f × %.0f m", W, (sim_.H_sim - 1) * sim_.SCALE);
+    ReadoutRow("Alan", b);
+    ReadoutRow("Deniz yüzeyi yansıması", p.free_surface ? "açık" : "kapalı");
+    std::snprintf(b, sizeof(b), "%d × %d, Δh %g m", sim_.W_sim, sim_.H_sim, sim_.SCALE);
+    ReadoutRow("Izgara", b);
+    std::snprintf(b, sizeof(b), "%d. derece, katsayı %.2f", p.fd_order, p.dt);
+    ReadoutRow("Türev, zaman adımı", b);
+    const NumericalStatus ns = sim_.numericalStatus();
+    const int cflLevel = ns.cfl_ratio < 0.85 ? 0 : ns.cfl_ratio < 1.0 ? 1 : 2;
+    std::snprintf(b, sizeof(b), "%%%d", (int)std::lround(ns.cfl_ratio * 100));
+    ReadoutRow("CFL oranı", b, levelColor(cflLevel));
+    const int pLevel = ns.ppw >= ns.min_ppw * 1.5 ? 0 : ns.ppw >= ns.min_ppw ? 1 : 2;
+    std::snprintf(b, sizeof(b), "%.1f", ns.ppw);
+    ReadoutRow("Dalga boyu başına nokta", b, levelColor(pLevel));
     ImGui::Dummy(ImVec2(0, S(4)));
 }
 
 void App::sectionFiles() {
-    if (!Section("Parametre dosyası", false)) return;
     const float w = ImGui::GetContentRegionAvail().x, half = (w - S(8)) * 0.5f;
     if (ToolButton("  Kaydet…", Btn::Secondary, ImVec2(half, 0))) saveFile();
     ImGui::SameLine(0, S(8));
@@ -552,7 +744,7 @@ void App::sectionFiles() {
 
 void App::sectionCpu() {
     if (sim_.mode == Mode::None || sim_.usingGpu() || sim_.threadStats.empty()) return;
-    if (!Section("İşlemci yükü", false)) return;
+    caption("İşlemci yükü");
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const int n = (int)sim_.threadStats.size();
     for (int i = 0; i < n; i++) {
@@ -577,6 +769,12 @@ void App::sectionCpu() {
 
 // ── Views: model / wavefield over the recordings ─────────────────────────
 void App::views(ImVec2 o, ImVec2 size) {
+    const float tabH = S(44);
+    viewTabs(o, ImVec2(size.x, tabH));
+    o.y += tabH;
+    size.y -= tabH;
+    if (view_ == 0) { scenePane(o, size); return; }
+    if (view_ == 1) { gatherPanes(o, size); return; }
     const float splitH = S(6);
     const float sceneH = std::round((size.y - splitH) * std::clamp(split_, 0.2f, 0.8f));
     scenePane(o, ImVec2(size.x, sceneH));
@@ -597,9 +795,9 @@ void App::views(ImVec2 o, ImVec2 size) {
 
 void App::scenePane(ImVec2 o, ImVec2 size) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    const float hH = S(32);
+    const float hH = S(40);
     dl->AddRectFilled(o, ImVec2(o.x + size.x, o.y + hH), col::abyss);
-    dl->AddText(fonts.uiBold, fonts.uiBold->FontSize, ImVec2(o.x + S(14), o.y + (hH - fonts.uiBold->FontSize) * 0.5f), col::textHi,
+    dl->AddText(fonts.subhead, fonts.subhead->FontSize, ImVec2(o.x + S(14), o.y + (hH - fonts.subhead->FontSize) * 0.5f), col::textHi,
                 "Model ve dalga alanı");
     {   // state on the right: mode, pause, simulated time
         char t[64];
@@ -657,9 +855,9 @@ void App::gatherPanes(ImVec2 o, ImVec2 size) {
     const float hH = S(40);
     dl->AddRectFilled(o, ImVec2(o.x + size.x, o.y + hH), col::abyss);
     const float cy = o.y + hH * 0.5f;
-    dl->AddText(fonts.uiBold, fonts.uiBold->FontSize, ImVec2(o.x + S(14), cy - fonts.uiBold->FontSize * 0.5f), col::textHi, "Kayıtlar");
+    dl->AddText(fonts.subhead, fonts.subhead->FontSize, ImVec2(o.x + S(14), cy - fonts.subhead->FontSize * 0.5f), col::textHi, "Kayıtlar");
     {   // legend: what each trace colour is
-        float x = o.x + S(14) + fonts.uiBold->CalcTextSizeA(fonts.uiBold->FontSize, FLT_MAX, 0, "Kayıtlar").x + S(18);
+        float x = o.x + S(14) + fonts.subhead->CalcTextSizeA(fonts.subhead->FontSize, FLT_MAX, 0, "Kayıtlar").x + S(18);
         auto key = [&](ImU32 c, const char* t) {
             dl->AddRectFilled(ImVec2(x, cy - S(1.5f)), ImVec2(x + S(14), cy + S(1.5f)), c, S(1));
             x += S(20);
@@ -685,11 +883,11 @@ void App::gatherPanes(ImVec2 o, ImVec2 size) {
         ImGui::Checkbox("Kübik", &gv_.smooth);
         Tip("Örnekler arasında kübik (Catmull-Rom) ara değerleme.");
         x -= S(14) + segW;
-        ImGui::SetCursorScreenPos(ImVec2(x, cy - S(15)));
+        ImGui::SetCursorScreenPos(ImVec2(x, cy - S(16)));
         int k = gv_.vd ? 1 : 0;
         if (Segmented("##gatherKind", kinds, 2, &k, segW, kindTips)) gv_.vd = k == 1;
     }
-    const float gap = S(5), capH = S(24);
+    const float gap = S(5), capH = S(32);
     const float py = o.y + hH, ph = size.y - hH;
     const float pw = (size.x - gap) * 0.5f;
     // Each pane: a caption strip naming it, then the plot
@@ -698,7 +896,7 @@ void App::gatherPanes(ImVec2 o, ImVec2 size) {
     dl->AddRectFilled(ImVec2(o.x + pw, py), ImVec2(o.x + pw + gap, py + ph), col::abyss);
     auto paneLabel = [&](float x0, float w, const char* name, bool empty, const char* emptyText) {
         dl->AddRectFilled(ImVec2(x0, py), ImVec2(x0 + w, py + capH), col::hull);
-        dl->AddText(fonts.label, fonts.label->FontSize, ImVec2(x0 + S(12), py + (capH - fonts.label->FontSize) * 0.5f), col::text, name);
+        dl->AddText(fonts.uiBold, fonts.uiBold->FontSize, ImVec2(x0 + S(12), py + (capH - fonts.uiBold->FontSize) * 0.5f), col::textHi, name);
         if (empty) {
             const ImVec2 es = fonts.ui->CalcTextSizeA(fonts.ui->FontSize, FLT_MAX, 0, emptyText);
             dl->AddText(fonts.ui, fonts.ui->FontSize, ImVec2(x0 + (w - es.x) * 0.5f + S(19), py + ph * 0.5f), col::muted, emptyText);

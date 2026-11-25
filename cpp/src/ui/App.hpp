@@ -5,8 +5,8 @@
 
 namespace ui {
 
-// The application window as a workstation: title bar, command bar, a collapsible parameter
-// panel on the left, the model / wavefield view over the two recordings on the right, and a
+// The application window as a workstation: title bar, command bar, an icon rail of parameter
+// groups with a panel showing one group, view tabs (model / recordings / side by side), and a
 // status bar. Nothing scrolls except the parameter panel.
 class App {
 public:
@@ -17,7 +17,9 @@ private:
     // Regions
     void titleBar(ImVec2 o, ImVec2 size);
     void commandBar(ImVec2 o, ImVec2 size);
+    void iconRail(ImVec2 o, ImVec2 size);
     void sidePanel(ImVec2 o, ImVec2 size, double now);
+    void viewTabs(ImVec2 o, ImVec2 size);
     void views(ImVec2 o, ImVec2 size);
     void scenePane(ImVec2 o, ImVec2 size);
     void gatherPanes(ImVec2 o, ImVec2 size);
@@ -56,7 +58,10 @@ private:
     Simulation& sim_;
     GatherView gv_;
     double now_ = 0;
-    float sideW_ = 340.0f;          // parameter panel width (logical px)
+    float sideW_ = 360.0f;          // parameter panel width (logical px), rail excluded
+    int group_ = 0;                 // parameter group shown in the panel
+    bool panelOpen_ = true;         // clicking the selected rail icon hides the panel
+    int view_ = 2;                  // 0 model, 1 recordings, 2 side by side
     float split_ = 0.56f;           // scene share of the view height
     int selMode_ = 0;               // 0 traditional, 1 SLO, 2 CLO (what Start runs)
     bool pendingObs_ = false, pendingNpml_ = false;
@@ -82,9 +87,7 @@ private:
     } imp_;
 
     // Line simulation settings
-    float lineFirstX_ = -1;        // < 0: not set yet (first position with the whole cable inside)
     int lineShots_ = 10;
-    float lineInterval_ = 25;
 };
 
 } // namespace ui

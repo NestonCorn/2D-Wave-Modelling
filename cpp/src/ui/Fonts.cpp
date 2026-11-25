@@ -93,11 +93,13 @@ void loadFonts(float scale) {
     std::string numeric = winFont("bahnschrift.ttf");   // DIN-style engineering face (Windows 10 1709+)
     if (numeric.empty()) numeric = regular;
 
-    fonts.ui = addFont(regular, 14.5f * scale, true);
-    fonts.uiBold = addFont(semibold, 14.5f * scale, true);
-    fonts.label = addFont(semibold, 12.5f * scale, true);
-    fonts.title = addFont(numeric, 17.0f * scale, true);
-    fonts.mono = addFont(numeric, 13.5f * scale, true);
+    fonts.ui = addFont(regular, 15.5f * scale, true);
+    fonts.uiBold = addFont(semibold, 15.5f * scale, true);
+    fonts.label = addFont(semibold, 13.0f * scale, true);
+    fonts.heading = addFont(semibold, 23.0f * scale, true);
+    fonts.subhead = addFont(semibold, 18.5f * scale, true);
+    fonts.title = addFont(numeric, 18.5f * scale, true);
+    fonts.mono = addFont(numeric, 14.5f * scale, true);
     fonts.monoBold = fonts.mono;
     fonts.canvas = addFont(numeric, 18.0f * scale, true);        // scene / gather text (drawn scaled)
     fonts.canvasBold = fonts.canvas;

@@ -86,6 +86,19 @@ inline std::vector<double> targetPulse(Wavelet type, int len) {
     return w;
 }
 
+// Target pulse as injected: it has to end, and it must end smoothly. A cut is a step in the
+// source time function, and a step radiates up to the grid limit: the minimum-phase pulse is
+// still 1.2e-3 of its peak at 3 periods (the Ricker family < 1e-8), and cutting it there sent
+// rings of grid-scale noise out of the source. A cosine taper over periods 4..5 (where every
+// target is < 1e-5 of its peak) changes the pulse by < 1e-5 and leaves no step.
+inline std::vector<double> injectedTarget(Wavelet type, int len) {
+    std::vector<double> x = targetPulse(type, len);
+    const int t0 = 4 * kPulseRate, t1 = 5 * kPulseRate;
+    for (int i = t0; i < len; i++)
+        x[i] *= i >= t1 ? 0.0 : 0.5 + 0.5 * std::cos(M_PI * (i - t0) / (t1 - t0));
+    return x;
+}
+
 // Injected source time function. Adding s(t) to P every step is a pressure-rate source, and
 // in 2D such a source radiates the half-derivative of s(t): a plain Ricker came out
 // asymmetric (deeper trailing trough, ~45 deg phase shift). Injecting the half-integral
@@ -106,12 +119,11 @@ public:
     void build(Wavelet type, double f) {
         type_ = type; f_ = f;
         dtau_ = 1.0 / (kPulseRate * f);
-        // All targets are < 1e-4 of their peak after 3 periods; the half-integral tail of a
-        // zero-area pulse decays like t^-3/2 (tempered for the Gaussian): keep 8 periods and
-        // taper the last 2.
+        // The target ends smoothly within 5 periods (injectedTarget); the half-integral tail
+        // of a zero-area pulse decays like t^-3/2 (tempered for the Gaussian): keep 8 periods
+        // and taper the last 2.
         const int n = 8 * kPulseRate;
-        std::vector<double> x = targetPulse(type, n);
-        for (int i = 3 * kPulseRate; i < n; i++) x[i] = 0.0;
+        std::vector<double> x = injectedTarget(type, n);
         std::vector<double> g(n);
         g[0] = 1.0;
         for (int k = 1; k < n; k++) g[k] = g[k - 1] * (k - 0.5) / k;

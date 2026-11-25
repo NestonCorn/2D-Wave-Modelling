@@ -568,6 +568,70 @@ static void testReceiverInterpolation() {
 // at every angle, R = (rho2 - rho1) / (rho2 + rho1), so the trace above the interface must be
 // the direct wave plus R times the wave of the mirror source - which a homogeneous run gives
 // at the mirror image of the receiver. A uniform density of any value must leave P as it is.
+// RMS of the (pi, pi) checkerboard component of a field: the grid-scale noise a step in a
+// source time function leaves behind (it hardly propagates on the grid, so it stays visible).
+static double checkerRms(const std::vector<float>& P, int W, int H) {
+    double e = 0;
+    long long n = 0;
+    for (int j = 1; j < H - 1; j++)
+        for (int i = 1; i < W - 1; i++) {
+            double c = 0;
+            for (int b = -1; b <= 1; b++)
+                for (int a = -1; a <= 1; a++)
+                    c += (a == 0 ? -2.0 : 1.0) * (b == 0 ? -2.0 : 1.0) / 16.0 * P[(size_t)(j + b) * W + i + a];
+            e += c * c;
+            n++;
+        }
+    return std::sqrt(e / std::max(1LL, n));
+}
+
+// The injected target must end without a step: the minimum-phase pulse was cut at 3 periods,
+// where it is still 1.2e-3 of its peak, and the step sent grid-scale rings out of the source
+// (well visible at low frequency, where the pulse itself is smooth on the grid).
+static void testPulseEnd() {
+    std::printf("[pulse end] injected targets end smoothly and match the full pulse\n");
+    const int n = 8 * kPulseRate;
+    for (Wavelet w : kAllWavelets) {
+        const std::vector<double> full = targetPulse(w, n), inj = injectedTarget(w, n);
+        double dev = 0, jump = 0;
+        for (int i = 0; i < n; i++) dev = std::max(dev, std::fabs(full[i] - inj[i]));
+        // largest sample-to-sample change after the pulse (a smooth tail changes slowly)
+        for (int i = 3 * kPulseRate; i < n; i++) jump = std::max(jump, std::fabs(inj[i] - inj[i - 1]));
+        std::printf("  %-8s max |injected - full| %.1e  largest step after 3 periods %.1e\n", waveletName(w), dev, jump);
+        CHECK(dev < 1e-5, "%s: injected pulse differs from the target by %.1e", waveletName(w), dev);
+        CHECK(inj[n - 1] == 0.0, "%s: injected pulse does not end", waveletName(w));
+    }
+}
+
+// A towed source moves while its pulse is injected; at low frequency the injection lasts
+// seconds (8 periods: 4 s at 2 Hz). The source used to follow the ship from cell to cell, so
+// crossing a cell boundary mid-pulse cut the source time function in one cell and started it
+// in the next: a step that filled the wave field and the recordings with grid-scale noise.
+static void testMovingSource() {
+    std::printf("[moving source] 2 Hz shot from a towed source that crosses a cell boundary mid-pulse\n");
+    double rel[2];
+    for (int moving = 0; moving < 2; moving++) {
+        Simulation sim;
+        SimParams& p = sim.p;
+        p.freq = 2;
+        p.ship_speed_knots = moving ? 4.5f : 0.0f;
+        sim.init(false);
+        // source 1 m before a cell boundary: at 4.5 kn crossed ~0.4 s into the 4 s injection
+        sim.onShipX((float)(std::floor((sim.sxShip - p.ship_src_dist) / sim.SCALE) * sim.SCALE + sim.SCALE - 1.0 + p.ship_src_dist));
+        sim.startMode(Mode::Trad);
+        double now = 0;
+        while (sim.cycle_t * sim.dtPhy() < 2.0) { now += 1.0 / 60; sim.update(now, 1.0 / 60); }
+        sim.cpuSolver().wait();
+        const std::vector<float>& P = sim.cpuSolver().P();
+        double rms = 0;
+        for (float v : P) rms += (double)v * v;
+        rms = std::sqrt(rms / P.size());
+        rel[moving] = checkerRms(P, sim.W_sim, sim.H_sim) / rms;
+    }
+    std::printf("  checkerboard / field rms at 2 s: fixed ship %.2e, moving ship %.2e\n", rel[0], rel[1]);
+    CHECK(rel[1] < 3 * rel[0] + 1e-4, "moving source leaves grid-scale noise (%.2e vs %.2e)", rel[1], rel[0]);
+}
+
 static void testDensity() {
     std::printf("[density] uniform density leaves P unchanged; a density step reflects with R = (r2 - r1) / (r2 + r1)\n");
     Setup s = makeSetup(1600, 1200, 2);
@@ -794,13 +858,15 @@ std::vector<uint8_t> readFile(const std::filesystem::path& p) {
     return std::vector<uint8_t>((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
 }
 // Runs a line on the CPU; returns the line folder ("" on failure)
-std::string runLine(double firstX, int n, double interval, const std::filesystem::path& root, std::string& alert) {
+std::string runLine(double firstX, int n, double interval, const std::filesystem::path& root, std::string& alert,
+                    Mode mode = Mode::Trad, float* srcOffset = nullptr) {
     Simulation sim;
     sim.p.sismo_ms = 300;
     sim.OCEAN_Y = sim.p.domain_H * 0.166;
     sim.init(false);
     Simulation::LineSettings ls;
-    ls.firstX = firstX; ls.nShots = n; ls.interval = interval;
+    ls.firstX = firstX; ls.nShots = n; ls.interval = interval; ls.mode = mode;
+    if (srcOffset) *srcOffset = sim.p.src_offset;
     const std::u8string u = root.u8string();
     ls.folder.assign(u.begin(), u.end());
     std::string err;
@@ -866,6 +932,50 @@ static void testLineExport() {
         }
     std::printf("  shot 2 of the line vs the same shot alone: max |diff| %.3g of %.3g\n", d, mx);
     CHECK(mx > 0 && d <= 1e-6 * mx, "shot 2 depends on shot 1 (%.3g of %.3g)", d, mx);
+
+    // CLO: per station a main record and a source-vessel record (its own streamer file, both
+    // in the OBS file); the source vessel's source X is src_offset ahead, plus the distance
+    // the ship sailed through the main record (300 ms at 4.5 kn)
+    float off = 0;
+    const std::string dirC = runLine(500, 2, 50, root / "c", alert, Mode::CLO, &off);
+    CHECK(!dirC.empty(), "CLO line did not finish: %s", alert.c_str());
+    if (!dirC.empty()) {
+        const auto m = readFile(std::filesystem::u8path(dirC) / "line_streamer.segy");
+        const auto sv = readFile(std::filesystem::u8path(dirC) / "line_streamer_src.segy");
+        const auto ob2 = readFile(std::filesystem::u8path(dirC) / "line_obs.segy");
+        const size_t nm = m.size() > 3600 ? (m.size() - 3600) / TB : 0, nsv = sv.size() > 3600 ? (sv.size() - 3600) / TB : 0;
+        const size_t nob = ob2.size() > 3600 ? (ob2.size() - 3600) / TB : 0;
+        int sxv = 0;
+        double peak = 0;
+        for (size_t t = 0; t < nsv; t++) {
+            const int shot = (int)(t / nRec);
+            sxv += std::abs(be32(sv, 3600 + t * TB + 72) - (int32_t)std::lround(500 + 50.0 * shot + off + 4.5 * 0.514444 * 0.3)) <= 1;
+            for (int k = 0; k < ns; k++) peak = std::max(peak, (double)std::fabs(bef(sv, 3600 + t * TB + 240 + (size_t)k * 4)));
+        }
+        std::printf("  CLO: main %zu, source vessel %zu streamer traces (source X ok %d), OBS %zu traces; source vessel peak %.3g\n",
+                    nm, nsv, sxv, nob, peak);
+        CHECK(nm == (size_t)2 * nRec && nsv == (size_t)2 * nRec, "CLO streamer traces %zu / %zu", nm, nsv);
+        CHECK(sxv == (int)nsv, "CLO source vessel source X in %d of %zu headers", sxv, nsv);
+        CHECK(nob == 2 * nObsTr / 3 * 2, "CLO OBS traces %zu (expected %zu)", nob, 2 * nObsTr / 3 * 2);
+        CHECK(peak > 0, "CLO source vessel record is empty");
+    }
+    // SLO: one blended record per station, different from the single-source one (compared on
+    // the OBS gather: the source vessel is ahead of the ship, its wave reaches the streamer
+    // only at the end of the 300 ms record)
+    const std::string dirS = runLine(500, 1, 50, root / "d", alert, Mode::SLO);
+    CHECK(!dirS.empty(), "SLO line did not finish: %s", alert.c_str());
+    if (!dirS.empty()) {
+        const auto sl = readFile(std::filesystem::u8path(dirS) / "line_obs.segy");
+        const size_t nObs1 = nObsTr / 3;
+        double dd = 0;
+        for (size_t i = 0; i < nObs1 && sl.size() >= 3600 + nObs1 * TB; i++)
+            for (int k = 0; k < ns; k++) {
+                const size_t o = 3600 + i * TB + 240 + (size_t)k * 4;
+                dd = std::max(dd, (double)std::fabs(bef(sl, o) - bef(ob, o)));
+            }
+        std::printf("  SLO: blended record differs from the single-source one by %.3g\n", dd);
+        CHECK(dd > 1e-3, "SLO line recorded no second source");
+    }
     std::filesystem::remove_all(root, ec);
 }
 
@@ -1210,6 +1320,7 @@ static void gpuSnapshots(const std::string& dir, float gain, bool minPhase, bool
 
 int main(int argc, char** argv) {
     const bool doBench = argc > 1 && std::string(argv[1]) == "--bench";
+    if (argc > 1 && std::string(argv[1]) == "--moving") { testMovingSource(); return failures ? 1 : 0; }
     bool haveGpu = false;
     GLFWwindow* win = nullptr;
     if (glfwInit()) {
@@ -1276,6 +1387,8 @@ int main(int argc, char** argv) {
     testPipelineMatchesBarrier();
     testSourceWaveletController();
     testReceiverInterpolation();
+    testPulseEnd();
+    testMovingSource();
     testDensity();
     testModelImport();
     testLineExport();

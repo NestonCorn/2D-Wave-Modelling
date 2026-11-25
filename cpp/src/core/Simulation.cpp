@@ -598,8 +598,7 @@ void Simulation::loopIteration() {
     accumulated_ -= stepsD;
 
     const double mps = p.ship_speed_knots * 0.514444;
-    const double cur_t_max = mps > 0 ? std::floor((p.shot_interval * 6000.0) / (mps * SCALE * p.dt))
-                                     : std::numeric_limits<double>::infinity();
+    const double cur_t_max = cloSwitchStep(mps);
     const double max_time = mode == Mode::CLO ? cur_t_max * 2 : cur_t_max;
     const double T_sismo = std::floor((p.sismo_ms * 6.0) / (SCALE * p.dt));
 
@@ -657,8 +656,7 @@ void Simulation::loopIteration() {
 void Simulation::submitBatch(int steps) {
     const double dt_phy = dtPhy();
     const double mps = p.ship_speed_knots * 0.514444;
-    const double cur_t_max = mps > 0 ? std::floor((p.shot_interval * 6000.0) / (mps * SCALE * p.dt))
-                                     : std::numeric_limits<double>::infinity();
+    const double cur_t_max = cloSwitchStep(mps);
     const double T_sismo = std::floor((p.sismo_ms * 6.0) / (SCALE * p.dt));
     const int NS = sismoSamples(), KS = sismoStepsPerSample();
 
@@ -680,8 +678,7 @@ void Simulation::submitBatch(int steps) {
         for (const Shot& sh : shots) {
             const double elapsed = (cyc - sh.t0) * dt_phy;
             const double val = pulse_(elapsed) * p.amp * p.dt * 0.4;
-            const double src_pos = (sh.main ? sx : sxs) - p.ship_src_dist;
-            const float si = (float)std::floor(src_pos / SCALE);
+            const float si = (float)std::floor(sh.x / SCALE);   // fixed for the whole shot
             if (sh.main) { d.si0 = si; d.sj0 = (float)sj_src; d.val0 = (float)val; d.act0 = val != 0 ? 1.f : 0.f; }
             else         { d.si1 = si; d.sj1 = (float)sj_src; d.val1 = (float)val; d.act1 = val != 0 ? 1.f : 0.f; }
         }
@@ -815,7 +812,9 @@ void Simulation::waitInFlight(bool apply) {
 void Simulation::fireShot(bool main, double delay) {
     if (main) shotsMain++;
     else shotsSrc++;
-    shots.push_back({main, cycle_t + delay});
+    // Where the source will be when it fires (the ship keeps moving through the delay)
+    const double x = (main ? sxShip : sxSrc) + delay * p.ship_speed_knots * 0.514444 * dtPhy() - p.ship_src_dist;
+    shots.push_back({main, cycle_t + delay, x});
     eikDirty_ = true;
 }
 
@@ -826,8 +825,7 @@ void Simulation::startEikonal() {
     std::vector<std::pair<int, int>> cells;
     const int sj = (int)std::floor((OCEAN_Y + p.source_depth) / SCALE);
     for (const Shot& sh : shots) {
-        double src_pos = (sh.main ? sxShip : sxSrc) - p.ship_src_dist;
-        cells.push_back({(int)std::floor(src_pos / SCALE), sj});
+        cells.push_back({(int)std::floor(sh.x / SCALE), sj});
     }
     const double scale = SCALE, dt = p.dt;
     const int W = W_sim, H = H_sim;
@@ -993,11 +991,19 @@ bool Simulation::startLine(const LineSettings& s, std::string& err) {
     if (line_.active) { err = "Bir hat simülasyonu zaten çalışıyor."; return false; }
     if (s.nShots < 1 || s.nShots > 100000) { err = "Atış sayısı 1 ile 100000 arasında olmalı."; return false; }
     if (!(s.interval > 0)) { err = "Atış aralığı sıfırdan büyük olmalı."; return false; }
+    if (s.mode == Mode::None) { err = "Hat için bir atış kipi seçilmeli."; return false; }
     const double W = W_sim > 0 ? (W_sim - 1) * SCALE : p.domain_W;
     const double lastX = s.firstX + (s.nShots - 1) * s.interval;
     if (s.firstX < 0 || lastX > W) {
         char b[200];
         std::snprintf(b, sizeof(b), "Atışlar %.1f – %.1f m arasında; modelin içinde (0 – %.0f m) kalmalı.", s.firstX, lastX, W);
+        err = b;
+        return false;
+    }
+    if (s.mode != Mode::Trad && lastX + p.src_offset > W) {
+        char b[220];
+        std::snprintf(b, sizeof(b), "Kaynak gemisi ana kaynağın %.0f m önünde; son atışta %.0f m'de, modelin dışında kalıyor (model %.0f m).",
+                      p.src_offset, lastX + p.src_offset, W);
         err = b;
         return false;
     }
@@ -1009,15 +1015,15 @@ bool Simulation::startLine(const LineSettings& s, std::string& err) {
     const std::u8string u8 = dir.u8string();
     line_.dir.assign(u8.begin(), u8.end());
     line_.streamer.close();
+    line_.streamerSrc.close();
     line_.obs.close();
     line_.firstX = s.firstX;
     line_.interval = s.interval;
     line_.n = s.nShots;
+    line_.mode = s.mode;
     line_.shot = 0;
-    line_.savedSpeed = p.ship_speed_knots;
     line_.savedShipX = sxShip;
     line_.active = true;
-    p.ship_speed_knots = 0;   // stationary during each record
     beginLineShot();
     return true;
 }
@@ -1032,7 +1038,15 @@ void Simulation::cancelLine() {
 double Simulation::lineProgress() const {
     if (!line_.active || line_.n <= 0) return 0.0;
     const double T = std::max(1.0, sismoSteps());
-    return std::clamp((line_.shot + std::min(1.0, cycle_t / T)) / line_.n, 0.0, 1.0);
+    const double total = line_.mode == Mode::CLO ? 2 * T : T;
+    return std::clamp((line_.shot + std::min(1.0, cycle_t / total)) / line_.n, 0.0, 1.0);
+}
+
+double Simulation::cloSwitchStep(double mps) const {
+    // A line records the source vessel right after the main record; the live loop fires it
+    // when the ship has sailed one shot interval.
+    if (line_.active) return sismoSteps();
+    return mps > 0 ? std::floor((p.shot_interval * 6000.0) / (mps * SCALE * p.dt)) : std::numeric_limits<double>::infinity();
 }
 
 void Simulation::beginLineShot() {
@@ -1040,20 +1054,38 @@ void Simulation::beginLineShot() {
     waitInFlight(false);
     sxShip = srcX + p.ship_src_dist;   // the source hangs ship_src_dist behind the ship
     sxSrc = sxShip + p.src_offset;
-    startMode(Mode::Trad);             // quiet wavefield, empty sismogram, fires the shot
+    line_.phase = 0;
+    line_.shotShipX = sxShip;
+    line_.obsMain.clear();
+    startMode(line_.mode);             // quiet wavefield, empty sismogram, fires the shot(s)
 }
 
 void Simulation::lineIteration() {
     const double T = sismoSteps();
-    if (cycle_t >= T) {   // record complete (the last batch has been applied)
+    const bool clo = line_.mode == Mode::CLO;
+    if (clo && line_.phase == 0 && cycle_t >= T) {
+        // Main record complete: write it, keep its OBS gather (the source vessel's record
+        // adds onto the same OBS samples), then record the source vessel's shot
         std::string err;
-        if (!appendLineShot(err)) { finishLine(false, err); return; }
+        if (!appendLineGathers(false, err)) { finishLine(false, err); return; }
+        const size_t o = (size_t)N_REC * 2 * kSismoStride;
+        line_.obsMain.assign(sismo.begin() + o, sismo.begin() + o + (size_t)N_OBS * kSismoStride);
+        line_.phase = 1;
+        line_.shotShipX = sxShip;
+    }
+    const double end = clo ? 2 * T : T;
+    if (cycle_t >= end) {   // record complete (the last batch has been applied)
+        std::string err;
+        if (!appendLineGathers(clo, err)) { finishLine(false, err); return; }
         line_.shot++;
         if (line_.shot >= line_.n) { finishLine(true, ""); return; }
         beginLineShot();
         return;
     }
-    const int steps = (int)std::clamp(T - cycle_t, 1.0, (double)MAX_STEPS);
+    // Batches end exactly at the record boundaries
+    const double stop = clo && cycle_t < T ? T : end;
+    const int steps = (int)std::clamp(stop - cycle_t, 1.0, (double)MAX_STEPS);
+    if (clo && cycle_t < T && cycle_t + steps >= T) fireShot(false, T - cycle_t);
     if (eikDirty_) {
         startEikonal();
         if (eikBusy_) { pendingSteps_ = steps; return; }
@@ -1061,42 +1093,56 @@ void Simulation::lineIteration() {
     submitBatch(steps);
 }
 
-bool Simulation::appendLineShot(std::string& err) {
+// One record of the current station. srcVessel: the CLO source vessel's record (streamer
+// slot 1, OBS = everything recorded minus the main record's gather).
+bool Simulation::appendLineGathers(bool srcVessel, std::string& err) {
     const int sn = line_.shot + 1;
     const int targetSamples = std::max(1, p.sismo_ms);   // 1.0 ms sample rate, as the live export
     const int ns = sismoSamples();
-    auto snap1 = resampleGather(sismo.data(), 0, N_REC, kSismoStride, ns, targetSamples);
+    auto snapS = resampleGather(sismo.data(), srcVessel ? (size_t)N_REC * kSismoStride : 0, N_REC, kSismoStride, ns, targetSamples);
+
+    // Source of this record: where it fired (the ship has moved on since)
+    double srcX = line_.firstX + line_.shot * line_.interval;
+    for (const Shot& sh : shots)
+        if (sh.main == !srcVessel) { srcX = sh.x; break; }
+    const char* kind = line_.mode == Mode::CLO ? "CLO" : line_.mode == Mode::SLO ? "SLO" : "TRAD";
 
     SegySpec base;
-    base.nSamples = targetSamples; base.dtMicros = 1000; base.shotNum = sn; base.modeLabel = "LINE";
+    base.nSamples = targetSamples; base.dtMicros = 1000; base.shotNum = sn; base.modeLabel = std::string("LINE ") + kind;
     base.sourceDepth = p.source_depth; base.fd_order = p.fd_order; base.freq = p.freq; base.SCALE = SCALE;
     base.domainW = p.domain_W; base.domainH = p.domain_H; base.oceanY = OCEAN_Y; base.geology = geoUpper(p.geology);
-    base.sourceX = sxShip - p.ship_src_dist;
+    base.sourceX = srcX;
 
-    char note[160];
-    std::snprintf(note, sizeof(note), "%d SHOTS  FIRST SOURCE X %.1fm  INTERVAL %.2fm", line_.n, line_.firstX, line_.interval);
+    char note[200];
+    std::snprintf(note, sizeof(note), "%d SHOTS  FIRST SOURCE X %.1fm  INTERVAL %.2fm  MODE %s  SPEED %.1fKN", line_.n,
+                  line_.firstX, line_.interval, kind, p.ship_speed_knots);
     const std::string base_dir = line_.dir;
 
-    {   // streamer
-        const double head_x = sxShip - p.ship_src_dist - p.src_rec_dist;
+    {   // streamer, at its position when the shot fired
+        const double head_x = line_.shotShipX - p.ship_src_dist - p.src_rec_dist;
         const double cable = p.cable_len, tail = p.cable_tail_depth, headD = p.cable_head_depth;
         const int nrec = N_REC;
         SegySpec s = base;
-        s.traces = snap1.data(); s.nTraces = N_REC; s.label = "STREAMER";
+        s.traces = snapS.data(); s.nTraces = N_REC; s.label = srcVessel ? "STREAMER (SOURCE VESSEL SHOT)" : "STREAMER";
         s.receiver = [=](int i) {
             double n = nrec > 1 ? (double)i / (nrec - 1) : 0.0;
             return SegyReceiver{head_x - cable + i * (nrec > 1 ? cable / (nrec - 1) : 0.0), 0.0, tail + (headD - tail) * n};
         };
-        if (!line_.streamer.isOpen()) {
-            const std::u8string u = (fs::u8path(base_dir) / "line_streamer.segy").u8string();
-            if (!line_.streamer.open(std::string(u.begin(), u.end()), s, note, err)) return false;
+        SegyLineWriter& w = srcVessel ? line_.streamerSrc : line_.streamer;
+        if (!w.isOpen()) {
+            const std::u8string u = (fs::u8path(base_dir) / (srcVessel ? "line_streamer_src.segy" : "line_streamer.segy")).u8string();
+            if (!w.open(std::string(u.begin(), u.end()), s, note, err)) return false;
         }
-        if (!line_.streamer.append(s, err)) return false;
+        if (!w.append(s, err)) return false;
     }
     if (p.obs_enabled && N_OBS > 0) {
-        auto snapO = resampleGather(sismo.data(), (size_t)N_REC * 2 * kSismoStride, N_OBS, kSismoStride, ns, targetSamples);
+        const size_t o = (size_t)N_REC * 2 * kSismoStride;
+        std::vector<float> obs(sismo.begin() + o, sismo.begin() + o + (size_t)N_OBS * kSismoStride);
+        if (srcVessel && line_.obsMain.size() == obs.size())
+            for (size_t i = 0; i < obs.size(); i++) obs[i] -= line_.obsMain[i];
+        auto snapO = resampleGather(obs.data(), 0, N_OBS, kSismoStride, ns, targetSamples);
         SegySpec s = base;
-        s.traces = snapO.data(); s.nTraces = N_OBS; s.label = "OBS";
+        s.traces = snapO.data(); s.nTraces = N_OBS; s.label = srcVessel ? "OBS (SOURCE VESSEL SHOT)" : "OBS";
         const double sp = p.obs_spacing;
         s.receiver = [this, sp](int i) {
             double rx = (i + 1) * sp;
@@ -1113,11 +1159,11 @@ bool Simulation::appendLineShot(std::string& err) {
 
 void Simulation::finishLine(bool ok, const std::string& why) {
     line_.streamer.close();
+    line_.streamerSrc.close();
     line_.obs.close();
     line_.active = false;
     const int done = line_.shot;
     stopMode();
-    p.ship_speed_knots = line_.savedSpeed;
     sxShip = line_.savedShipX;
     sxSrc = sxShip + p.src_offset;
     if (ok)
@@ -1153,7 +1199,7 @@ bool Simulation::applyConfigJson(const std::string& text, std::string& err) {
     np.ship_src_dist = std::clamp(np.ship_src_dist, 0.0f, 300.0f);
     np.src_rec_dist = std::clamp(np.src_rec_dist, 0.0f, 500.0f);
     np.ship_speed_knots = std::clamp(np.ship_speed_knots, 0.0f, 12.0f);
-    np.shot_interval = std::clamp(np.shot_interval, 6.25f, 100.0f);
+    np.shot_interval = std::clamp(np.shot_interval, 6.25f, 1000.0f);
     np.domain_W = std::clamp(np.domain_W, 800.0f, 25000.0f);   // a zero/negative domain crashed the grid setup
     np.domain_H = std::clamp(np.domain_H, 400.0f, 12000.0f);
     np.gain = std::clamp(np.gain, 1.0f, 100.0f);

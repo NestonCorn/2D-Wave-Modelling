@@ -14,7 +14,10 @@
 #include "Segy.hpp"
 #include "Wavelet.hpp"
 
-struct Shot { bool main; double t0; };
+// t0: firing step. x: source position (m) at the firing instant. The whole source time
+// function is injected there: at low frequency it lasts seconds, and following the towed
+// source from cell to cell put a step into it at every cell crossing (grid-scale noise).
+struct Shot { bool main; double t0; double x; };
 
 enum class BadgeKind { Init, Gpu, ForcedCpu, Warning, Cpu };
 struct Badge {
@@ -85,14 +88,19 @@ public:
     const std::string& segyButtonLabel(double now);
 
     // ── Line simulation: every shot of a line into one SEG-Y per receiver type ──
-    // Shot k fires at source x = firstX + k * interval with the current geometry and
-    // parameters (traditional single-source shooting, the ship stationary during each
-    // record). Each shot starts from a quiet wavefield and runs for the recording length;
-    // its streamer and OBS gathers are appended to line_streamer.segy / line_obs.segy in a
-    // new folder under `folder`. Runs batch by batch from update(), so the UI stays live.
+    // Station k: the main source fires at x = firstX + k * interval, with every current
+    // parameter, the ship moving at the set speed through the record (the streamer moves,
+    // each source stays where it fired). Each station starts from a quiet wavefield.
+    //   Trad  one shot, one record.
+    //   SLO   the source vessel (src_offset ahead) fires 25 steps later: one blended record.
+    //   CLO   the source vessel fires when the main record ends: a second record of the
+    //         recording length (streamer -> line_streamer_src.segy, OBS -> line_obs.segy).
+    // Gathers are appended to line_streamer.segy / line_obs.segy in a new folder under
+    // `folder`. Runs batch by batch from update(), so the UI stays live.
     struct LineSettings {
         double firstX = 0, interval = 25;
         int nShots = 1;
+        Mode mode = Mode::Trad;
         std::string folder;
     };
     bool startLine(const LineSettings& s, std::string& err);
@@ -100,6 +108,8 @@ public:
     bool lineActive() const { return line_.active; }
     int lineShotsDone() const { return line_.shot; }
     int lineShots() const { return line_.n; }
+    double lineFirstX() const { return line_.firstX; }
+    Mode lineMode() const { return line_.mode; }
     double lineProgress() const;   // 0..1 over the whole line
     const std::string& lineFolder() const { return line_.dir; }
 
@@ -186,7 +196,6 @@ private:
     void segySnapshotAndSave();
     void beginLineShot();
     void lineIteration();
-    bool appendLineShot(std::string& err);
     void finishLine(bool ok, const std::string& why);
     void checkInstabilityFromSismo();
     void setInstability();
@@ -242,9 +251,14 @@ private:
         bool active = false;
         int shot = 0, n = 0;            // shots finished, shots planned
         double firstX = 0, interval = 25;
-        float savedSpeed = 0;
+        Mode mode = Mode::Trad;
+        int phase = 0;                  // CLO: 0 main record, 1 source-vessel record
+        double shotShipX = 0;           // ship x when the current record's shot fired
+        std::vector<float> obsMain;     // CLO: OBS gather at the end of the main record
         double savedShipX = 0;
         std::string dir;
-        SegyLineWriter streamer, obs;
+        SegyLineWriter streamer, streamerSrc, obs;
     } line_;
+    bool appendLineGathers(bool srcVessel, std::string& err);
+    double cloSwitchStep(double mps) const;   // CLO: step at which the source vessel fires
 };

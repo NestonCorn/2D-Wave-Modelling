@@ -62,11 +62,13 @@ inline const char* const Delete = "\uE74D";
 
 // ── Fonts ────────────────────────────────────────────────────────────────
 struct Fonts {
-    ImFont* ui = nullptr;        // Segoe UI 14.5: body text, field labels
-    ImFont* uiBold = nullptr;    // Segoe UI Semibold 14.5: buttons, emphasis
-    ImFont* label = nullptr;     // Segoe UI Semibold 12.5: section headings in panels, small captions
-    ImFont* title = nullptr;     // Bahnschrift 17: application name, pane titles
-    ImFont* mono = nullptr;      // Bahnschrift 13.5: numbers (values, readouts, status bar)
+    ImFont* ui = nullptr;        // Segoe UI 15.5: body text, field labels
+    ImFont* uiBold = nullptr;    // Segoe UI Semibold 15.5: buttons, emphasis
+    ImFont* label = nullptr;     // Segoe UI Semibold 13: section headings in panels, small captions
+    ImFont* heading = nullptr;   // Segoe UI Semibold 23: title of the parameter group shown in the panel
+    ImFont* subhead = nullptr;   // Segoe UI Semibold 18.5: heading of a part of a group
+    ImFont* title = nullptr;     // Bahnschrift 18.5: application name, pane titles
+    ImFont* mono = nullptr;      // Bahnschrift 14.5: numbers (values, readouts, status bar)
     ImFont* monoBold = nullptr;  // Bahnschrift 13.5
     ImFont* canvas = nullptr;    // Bahnschrift 18: text drawn on the scene / gathers (scaled)
     ImFont* canvasBold = nullptr;
@@ -97,7 +99,8 @@ ImVec2 ToolButtonSize(const char* label, ImFont* f);
 bool ToolButton(const char* label, Btn kind = Btn::Secondary, ImVec2 size = ImVec2(0, 0), const char* tip = nullptr);
 bool StyledButton(const char* label, ImU32 bg, ImU32 border, ImU32 text, ImVec2 size = ImVec2(0, 0), ImU32 hoverBg = 0);
 bool Switch(const char* label, bool* v, const char* tip = nullptr);   // full-width row; toggles *v, true when clicked
-bool Segmented(const char* id, const char* const items[], int n, int* cur, float width = 0, const char* const tips[] = nullptr);
+bool Segmented(const char* id, const char* const items[], int n, int* cur, float width = 0, const char* const tips[] = nullptr,
+               float height = 0);
 bool Section(const char* title, bool defaultOpen = true);             // collapsible panel section; true when open
 
 // Flow layout: puts the next item on a new line when it would not fit (flex-wrap).

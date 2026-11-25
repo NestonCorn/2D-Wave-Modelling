@@ -92,7 +92,7 @@ bool ParamRow(const char* label, const char* id, float* v, float vmin, float vma
     bool ch = numberBox("##n", v, vmin, vmax, fmt, inputW);
     ImGui::SetCursorPos(ImVec2(p.x, ImGui::GetCursorPosY() - S(4)));
     ch |= RangeSlider("##s", v, vmin, vmax, step, avail);
-    ImGui::Dummy(ImVec2(0, S(2)));
+    ImGui::Dummy(ImVec2(0, S(6)));
     ImGui::PopID();
     return ch;
 }
@@ -145,7 +145,7 @@ void Tip(const char* text) {
 // ── Buttons ──────────────────────────────────────────────────────────────
 ImVec2 ToolButtonSize(const char* label, ImFont* f) {
     const ImVec2 ts = f->CalcTextSizeA(f->FontSize, FLT_MAX, 0, label, ImGui::FindRenderedTextEnd(label));
-    return ImVec2(ts.x + S(24), std::max(S(30), ts.y + S(12)));
+    return ImVec2(ts.x + S(32), std::max(S(32), ts.y + S(14)));
 }
 
 bool ToolButton(const char* label, Btn kind, ImVec2 size, const char* tip) {
@@ -222,14 +222,14 @@ bool Switch(const char* label, bool* v, const char* tip) {
 }
 
 // ── Segmented control: the selection slides to the clicked segment ──────
-bool Segmented(const char* id, const char* const items[], int n, int* cur, float width, const char* const tips[]) {
+bool Segmented(const char* id, const char* const items[], int n, int* cur, float width, const char* const tips[], float height) {
     ImFont* f = fonts.uiBold;
     float w = width;
     if (w <= 0) {
         w = 0;
         for (int i = 0; i < n; i++) w += f->CalcTextSizeA(f->FontSize, FLT_MAX, 0, items[i]).x + S(28);
     }
-    const float h = S(30), segW = w / n;
+    const float h = height > 0 ? height : S(32), segW = w / n;
     const ImVec2 p0 = ImGui::GetCursorScreenPos();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(p0, ImVec2(p0.x + w, p0.y + h), U(col::deck), S(4));
@@ -301,7 +301,7 @@ bool BeginCard(const char* id, const char* title, ImU32 titleCol) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(14), S(12)));
     bool open = ImGui::BeginChild(id, ImVec2(0, 0), ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding);
     if (title) {
-        ImGui::PushFont(fonts.label);
+        ImGui::PushFont(fonts.uiBold);
         ImGui::PushStyleColor(ImGuiCol_Text, vec(titleCol ? titleCol : col::muted));
         ImGui::TextUnformatted(title);
         ImGui::PopStyleColor();

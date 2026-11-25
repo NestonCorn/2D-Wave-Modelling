@@ -11,8 +11,8 @@ Gerçek zamanlı 2B akustik dalga modellemesi ile deniz sismiği veri toplama si
 Tek ekranlık bir çalışma istasyonu düzeni:
 
 - **Komut çubuğu:** atış kipi (Geleneksel / SLO / CLO), başlat–duraklat (Boşluk tuşu), sıfırla, kayıt uzunluğu, canlı SEG-Y kaydı. Hat simülasyonu sürerken ilerleme ve durdurma düğmesi burada görünür.
-- **Parametre paneli:** daraltılabilir bölümler; kaynak ve dalgacık, ortam ve yeraltı modeli, saha geometrisi, OBS, sayısal çözüm, görünüm, hat simülasyonu, parametre dosyası.
-- **Görünümler:** üstte model ve dalga alanı, altta streamer ve OBS kayıtları; ayırıcılar sürüklenerek boyutlandırılır. Kayıtlarda wiggle ya da gri tonlu yoğunluk gösterimi, kübik ara değerleme, eksenlerde sürükleyerek kaydırma ve yakınlaştırma.
+- **Parametre grupları:** soldaki ikon şeridinden bir grup seçilir, panel yalnız o grubu gösterir (kaynak ve dalgacık, ortam ve yeraltı modeli, saha geometrisi, OBS, sayısal çözüm, görünüm, hat simülasyonu, parametre dosyası). Seçili ikona yeniden tıklamak paneli gizler.
+- **Görünüm sekmeleri:** Model, Kayıtlar ve Yan yana (Ctrl+1 / 2 / 3). Yan yana görünümde üstte model ve dalga alanı, altta streamer ve OBS kayıtları; ayırıcılar sürüklenerek boyutlandırılır. Kayıtlarda wiggle ya da gri tonlu yoğunluk gösterimi, kübik ara değerleme, eksenlerde sürükleyerek kaydırma ve yakınlaştırma.
 - **Durum çubuğu:** ızgara, CFL oranı, dalga boyu başına nokta, hesaplama motoru, atış sayısı. Başlık çubuğundaki GPU/CPU göstergesine tıklayınca motor değişir.
 
 ## Özellikler
@@ -33,7 +33,8 @@ Tek ekranlık bir çalışma istasyonu düzeni:
 
 **Kaynak dalgacıkları**
 - Ricker (sıfır faz), minimum faz, Gauss, Gauss'un 1. türevi
-- Kaynak, 2B'de yayılan darbenin seçilen dalgacıkla aynı şekilde olacağı biçimde (yarı-integral düzeltmesiyle) enjekte edilir
+- Kaynak, 2B'de yayılan darbenin seçilen dalgacıkla aynı şekilde olacağı biçimde (yarı-integral düzeltmesiyle) enjekte edilir; dalgacık basamaksız biter
+- Hareket eden gemide her atış ateşlendiği hücrede kalır: düşük frekansta saniyeler süren kaynak sinyali hücre değiştirmez, ızgara gürültüsü oluşmaz
 
 **Veri toplama**
 - Geleneksel, SLO ve CLO atış kipleri; hareketli gemi, streamer ve deniz tabanı alıcıları (OBS)
@@ -42,9 +43,10 @@ Tek ekranlık bir çalışma istasyonu düzeni:
 - Canlı SEG-Y Rev1 kaydı (her atış ayrı dosya), parametrelerin JSON olarak kaydedilip yüklenmesi
 
 **Hat simülasyonu**
-- İlk atış konumu, atış sayısı ve atış aralığıyla bir hattın bütün atışları mevcut geometri ve parametrelerle simüle edilir
-- Her atış sessiz dalga alanından başlar; gemi atış boyunca sabittir, tek kaynak kullanılır
-- Bütün atışlar `line_streamer.segy` ve `line_obs.segy` dosyalarına eklenir (FFID, kaynak ve alıcı koordinatları, 1 ms örnek aralığı)
+- Panelde yalnız atış sayısı girilir; ilk atış ana kaynağın konumunda, atışlar saha geometrisindeki atış aralığıyla dizilir. Öteki bütün ayarlar (kip, gemi hızı, dalgacık, model, geometri, sayısal çözüm) ilgili gruplardan alınır ve panelin altında özetlenir
+- Seçili atış kipiyle çalışır: Geleneksel tek kaynak; SLO'da kaynak gemisi aynı kayda atar; CLO'da ana kayıttan sonra kaynak gemisi atar ve ikinci bir kayıt alınır
+- Gemi kayıt boyunca ilerler, kablo onunla gider; her kaynak attığı yerde kalır. Her istasyon sessiz dalga alanından başlar
+- Atışlar `line_streamer.segy`, `line_obs.segy` ve CLO'da `line_streamer_src.segy` dosyalarına eklenir (FFID, atış anındaki kaynak ve alıcı koordinatları, 1 ms örnek aralığı)
 
 ## Performans
 
@@ -84,7 +86,8 @@ Başsız testler şunları denetler:
 - Alıcı ara değerlemesi (izden ize varış zamanı ve genlik düzgünlüğü)
 - Yoğunluk: tek yoğunlukta sonucun değişmemesi, yoğunluk sınırında yansıma katsayısının (ρ₂ − ρ₁)/(ρ₂ + ρ₁) çıkması
 - Model dosyaları (SEG-Y IEEE/IBM, ham float32, CSV) ve modelin simülasyona yüklenmesi
-- Hat simülasyonu (iz başlıkları, atışların birbirinden bağımsızlığı), SEG-Y düzeni ve JSON gidiş-dönüşü
+- Dalgacığın basamaksız bitmesi, hareketli kaynağın ızgara gürültüsü üretmemesi
+- Hat simülasyonu (iz başlıkları, atışların birbirinden bağımsızlığı, SLO ve CLO kayıtları), SEG-Y düzeni ve JSON gidiş-dönüşü
 
 `--bench` ile hız ölçümü de çalışır. Ortam değişkenleri: `FDTD_PIPELINE=0` CPU zaman bloklamasını kapatır, `FDTD_TILE=64x4` GPU iş grubu boyutunu değiştirir.
 

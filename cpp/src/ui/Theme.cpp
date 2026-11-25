@@ -8,7 +8,7 @@ void applyTheme(float scale) {
     ImGuiStyle& s = ImGui::GetStyle();
     s = ImGuiStyle();
     s.WindowPadding = ImVec2(0, 0);
-    s.FramePadding = ImVec2(8, 5);
+    s.FramePadding = ImVec2(9, 6);
     s.ItemSpacing = ImVec2(8, 8);
     s.ItemInnerSpacing = ImVec2(6, 4);
     s.IndentSpacing = 14;
