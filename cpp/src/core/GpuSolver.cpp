@@ -29,10 +29,6 @@ struct ParamsUBO {   // std140, all scalars → tightly packed
 };
 static_assert(sizeof(ParamsUBO) == 64, "UBO layout");
 
-void zeroBuffer(unsigned b) {
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, b);
-    glClearBufferData(GL_SHADER_STORAGE_BUFFER, GL_R32F, GL_RED, GL_FLOAT, nullptr);
-}
 } // namespace
 
 GpuSolver::~GpuSolver() { destroy(); }
@@ -63,6 +59,8 @@ void GpuSolver::destroy() {
         for (unsigned prog : {p.vel, p.pres, p.src, p.sismo, p.pix})
             if (prog) glDeleteProgram(prog);
     programs_.clear();
+    if (clearProg_) glDeleteProgram(clearProg_);
+    clearProg_ = 0;
     if (buf_[0]) glDeleteBuffers(B_COUNT, buf_);
     std::memset(buf_, 0, sizeof(buf_));
     if (ubo_) glDeleteBuffers(1, &ubo_);
@@ -84,12 +82,18 @@ bool GpuSolver::init(int W, int H, int nRec, int nObs, std::string& err) {
     // streamed the whole wavefield over PCIe (~14 GB/s, i.e. ~200 Mcells/s on any grid size).
     // Only the small per-batch buffers keep CPU-update rights (GL_DYNAMIC_STORAGE_BIT);
     // the velocity model goes up through a staging copy (setVsq).
+    // Buffers are created from zero-filled data. glClearBufferData is not used anywhere: the
+    // Intel Graphics driver ignored it on these GPU-only buffers, so a new solver could start
+    // from a deleted buffer's contents (Vz came up holding the previous velocity model) and
+    // a cleared wavefield kept its old values. Runtime clears go through kClear (zeroBuffer).
+    std::vector<float> zeros;
     auto alloc = [&](int b, size_t bytes, bool cpuWritable) {
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, buf_[b]);
         bytes = std::max<size_t>(bytes, 16);
-        if (glBufferStorage) glBufferStorage(GL_SHADER_STORAGE_BUFFER, bytes, nullptr, cpuWritable ? GL_DYNAMIC_STORAGE_BIT : 0);
-        else glBufferData(GL_SHADER_STORAGE_BUFFER, bytes, nullptr, cpuWritable ? GL_DYNAMIC_DRAW : GL_STATIC_DRAW);
-        glClearBufferData(GL_SHADER_STORAGE_BUFFER, GL_R32F, GL_RED, GL_FLOAT, nullptr);
+        if (zeros.size() * 4 < bytes) zeros.assign(bytes / 4 + 1, 0.0f);
+        if (glBufferStorage) glBufferStorage(GL_SHADER_STORAGE_BUFFER, bytes, zeros.data(), cpuWritable ? GL_DYNAMIC_STORAGE_BIT : 0);
+        else glBufferData(GL_SHADER_STORAGE_BUFFER, bytes, zeros.data(), cpuWritable ? GL_DYNAMIC_DRAW : GL_STATIC_DRAW);
+        bufFloats_[b] = bytes / 4;
     };
     for (int b : {B_P, B_VX, B_VZ, B_VSQ, B_PSIVX, B_PSIVZ, B_PSIPX, B_PSIPZ}) alloc(b, N * 4, false);
     alloc(B_CPML, (size_t)(2 * W + 2 * H) * 4, true);
@@ -207,11 +211,29 @@ void GpuSolver::setObs(const std::vector<float>& obsX, const std::vector<float>&
     glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, v.size() * 4, v.data());
 }
 
-void GpuSolver::clearFields() { wait(); for (int b : {B_P, B_VX, B_VZ}) zeroBuffer(buf_[b]); }
-void GpuSolver::clearPsi() { wait(); for (int b : {B_PSIVX, B_PSIVZ, B_PSIPX, B_PSIPZ}) zeroBuffer(buf_[b]); }
+// Zero a buffer with a compute pass (see init for why not glClearBufferData)
+void GpuSolver::zeroBuffer(int b) {
+    if (!clearProg_) {
+        std::string err;
+        clearProg_ = makeProgram(2, shaders::kClear, err);
+        if (!clearProg_) return;
+        clearCountLoc_ = glGetUniformLocation(clearProg_, "uCount");
+    }
+    const size_t n = bufFloats_[b];
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, kClearBinding, buf_[b]);
+    glUseProgram(clearProg_);
+    glUniform1ui(clearCountLoc_, (GLuint)n);
+    glDispatchCompute((GLuint)std::min<size_t>((n + 255) / 256, 65535), 1, 1);   // grid-stride loop in the shader
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
+    glUseProgram(0);
+}
+
+void GpuSolver::clearFields() { wait(); for (int b : {B_P, B_VX, B_VZ}) zeroBuffer(b); }
+void GpuSolver::clearPsi() { wait(); for (int b : {B_PSIVX, B_PSIVZ, B_PSIPX, B_PSIPZ}) zeroBuffer(b); }
 void GpuSolver::clearSismo() {
     wait();
-    zeroBuffer(buf_[B_SISMO]);
+    zeroBuffer(B_SISMO);
     std::fill(sismo_.begin(), sismo_.end(), 0.0f);
 }
 
@@ -317,4 +339,8 @@ void GpuSolver::readP(std::vector<float>& out) {
     glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, buf_[B_P]);
     glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, out.size() * 4, out.data());
+}
+void GpuSolver::readBuf(int b, size_t n, std::vector<float>& out) {
+    wait(); out.resize(n); glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, buf_[b]); glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, n * 4, out.data());
 }

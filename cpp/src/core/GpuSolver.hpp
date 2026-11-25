@@ -41,7 +41,8 @@ public:
 
     const std::vector<float>& sismo() const { return sismo_; }
     bool instabilityDetected() const { return unstable_; }   // from the last batch's probe row
-    void readP(std::vector<float>& out);   // tests only (blocking)
+    void readP(std::vector<float>& out);
+    void readBuf(int b, size_t n, std::vector<float>& out);   // tests only (blocking): buffer b (Binding index)   // tests only (blocking)
 
 private:
     struct Programs { unsigned vel = 0, pres = 0, src = 0, sismo = 0, pix = 0; int locStep[5]{}; };
@@ -52,6 +53,11 @@ private:
     int W_ = 0, H_ = 0, nRec_ = 0, nObs_ = 0;
     size_t sismoSize_ = 0;
     unsigned buf_[13]{};       // SSBOs by binding index (Binding in GpuSolver.cpp)
+    size_t bufFloats_[13]{};   // their sizes (floats)
+    unsigned clearProg_ = 0;   // kClear
+    int clearCountLoc_ = -1;
+    static constexpr int kClearBinding = 13;   // kClear's target buffer
+    void zeroBuffer(int b);
     unsigned ubo_ = 0, readback_ = 0;
     std::map<int, Programs> programs_;
     void* fence_ = nullptr;   // GLsync

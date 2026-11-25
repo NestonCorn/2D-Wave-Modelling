@@ -88,6 +88,44 @@ static BatchJob makeJob(const Setup& s, const std::vector<StepData>& st, int ord
     return J;
 }
 
+// Re-created GPU solvers must start from zero, and clearFields / clearPsi / clearSismo must
+// zero their buffers. On Intel Graphics glClearBufferData was ignored on the GPU-only
+// buffers: every second new solver had Vz holding the previous velocity model, and the
+// CPU/GPU parity cases after the first two failed.
+static void testGpuReinit(bool haveGpu) {
+    std::printf("[gpu reinit] new solvers start from zero, clears zero the buffers\n");
+    if (!haveGpu) { std::printf("  SKIP: no OpenGL 4.3 context\n"); return; }
+    Setup s = makeSetup(1200, 480, 4);
+    const size_t N = (size_t)s.W * s.H, nSismo = (size_t)(s.nRec * 2 + s.nObs) * kSismoStride;
+    const int fields[] = {0, 1, 2, 4, 5, 6, 7};   // P, Vx, Vz, psi x4 (Binding in GpuSolver.cpp)
+    double worstInit = 0, worstClear = 0, ran = 0;
+    for (int inst = 0; inst < 4; inst++) {
+        GpuSolver gpu;
+        std::string err;
+        const bool ok = gpu.init(s.W, s.H, s.nRec, s.nObs, err) && gpu.ensurePrograms(6, err);
+        CHECK(ok, "GPU init: %s", err.c_str());
+        if (!ok) return;
+        gpu.setVsq(s.vsq);
+        gpu.setCpml(s.bx, s.ax, s.bz, s.az);
+        gpu.setObs(s.obsX, s.obsY);
+        std::vector<float> v;
+        auto maxOf = [&](int b, size_t n) { gpu.readBuf(b, n, v); double m = 0; for (float x : v) m = std::max(m, (double)std::fabs(x)); return m; };
+        for (int b : fields) worstInit = std::max(worstInit, maxOf(b, N));
+        auto st = makeSteps(s, 0, 100, 3000);
+        gpu.submit(makeJob(s, st, 6), 0);
+        gpu.wait();
+        ran = std::max(ran, maxOf(0, N));
+        gpu.clearFields(); gpu.clearPsi(); gpu.clearSismo();
+        for (int b : fields) worstClear = std::max(worstClear, maxOf(b, N));
+        worstClear = std::max(worstClear, maxOf(9, nSismo));
+        gpu.destroy();
+    }
+    std::printf("  4 solvers: max |field| after init %.3g, after a batch %.3g, after clear %.3g\n", worstInit, ran, worstClear);
+    CHECK(ran > 1e-3, "the batch did not move the wavefield");
+    CHECK(worstInit == 0, "a new GPU solver started with non-zero fields (%.3g)", worstInit);
+    CHECK(worstClear == 0, "GPU clears left non-zero values (%.3g)", worstClear);
+}
+
 static void testParity(bool haveGpu) {
     std::printf("[parity] CPU vs GPU, 1200x480 m, 500 steps\n");
     if (!haveGpu) { std::printf("  SKIP: no OpenGL 4.3 context\n"); return; }
@@ -915,6 +953,7 @@ int main(int argc, char** argv) {
         return 0;
     }
     testParity(haveGpu);
+    testGpuReinit(haveGpu);
     testPixels();
     testInstability(haveGpu);
     testEikonal();

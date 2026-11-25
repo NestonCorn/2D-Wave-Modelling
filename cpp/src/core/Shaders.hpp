@@ -100,6 +100,17 @@ void main() {
 }
 )GLSL";
 
+// Zero the buffer bound at binding 13 (GpuSolver::zeroBuffer; replaces glClearBufferData,
+// which the Intel Graphics driver ignored). Grid-stride loop: any size from one dispatch.
+inline const char* kClear = R"GLSL(
+layout(local_size_x = 256) in;
+layout(std430, binding = 13) writeonly buffer B13 { float zbuf[]; };
+uniform uint uCount;
+void main() {
+    for (uint i = gl_GlobalInvocationID.x; i < uCount; i += gl_NumWorkGroups.x * 256u) zbuf[i] = 0.0;
+}
+)GLSL";
+
 // Phase 3b: point-source injection (see CpuSolver::serialPhase). A single invocation
 // handles both shots so coinciding sources never race.
 inline const char* kSource = R"GLSL(
