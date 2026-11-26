@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include "Ui.hpp"
+#include "core/Colormap.hpp"
 
 namespace ui {
 
@@ -177,9 +178,14 @@ void drawScene(Simulation& sim, ImDrawList* dl, ImVec2 o, float k, float ky, int
     dl->AddLine(c.P(0, OY), c.P(W, OY), withAlpha(col::data, 0.45f), 2 * rX * k);
 
     if (sim.modelTex) {
-        // Imported model: its velocity image, with the seafloor found in it
+        // Every model in its velocity colours (the colour bar reads them); the preset layer
+        // boundaries stay drawn as crisp lines over it
         dl->AddImage((ImTextureID)(intptr_t)sim.modelTex, c.P(0, 0), c.P(W, H));
         strokeCurve(c, sim.layout.seafloor, hex(0x3A6280), 2 * rX * k);
+        if (p.geology != GeologyModel::Imported) {
+            strokeCurve(c, sim.layout.deep, hex(0x456378), 2 * rX * k);
+            if (!sim.layout.salt.empty()) strokeCurve(c, sim.layout.salt, hex(0xD8E2EA), 3 * rX * k);
+        }
     } else {
         // Layers (painter's algorithm)
         fillBelow(c, sim.layout.seafloor, H, hex(0x1A3247));
@@ -267,6 +273,52 @@ void drawScene(Simulation& sim, ImDrawList* dl, ImVec2 o, float k, float ky, int
             drawOBS(c, (float)rx * toPX, (float)ry, rX);
         }
     }
+    // Velocity colour bar: which colour is which velocity (bottom right, drawn last: on top of everything)
+    if (p.show_colorbar && sim.modelTex) {
+        const auto [vlo, vhi] = sim.viewVelocityRange();
+        const ModelColormap cm = (ModelColormap)std::clamp(p.model_colormap, 0, (int)ModelColormap::Count - 1);
+        const ImVec2 b1 = c.P(W, H);
+        const float barH = std::clamp((b1.y - c.P(0, OY).y) * 0.55f, S(80), S(220)), barW = S(14);
+        ImFont* f = fonts.mono;
+        const float fs = f->FontSize;
+        // ticks at round velocities
+        const double span = std::max(1.0, (double)vhi - vlo);
+        double step = std::pow(10.0, std::floor(std::log10(span / 4.0)));
+        for (double m : {1.0, 2.0, 2.5, 5.0, 10.0})
+            if (span / (m * step) <= 5.0) { step *= m; break; }
+        char buf[32];
+        float labelW = f->CalcTextSizeA(fs, FLT_MAX, 0, "0000").x;
+        for (double v = std::ceil(vlo / step) * step; v <= vhi + 1e-6; v += step) {
+            std::snprintf(buf, sizeof(buf), "%.0f", v);
+            labelW = std::max(labelW, f->CalcTextSizeA(fs, FLT_MAX, 0, buf).x);
+        }
+        const char* title = "Hız (m/s)";
+        const float titleW = fonts.label->CalcTextSizeA(fonts.label->FontSize, FLT_MAX, 0, title).x;
+        const float pad = S(10), cardW = std::max(titleW, barW + S(8) + labelW) + 2 * pad;
+        const float cardH = fonts.label->FontSize + S(8) + barH + fs * 0.5f + 2 * pad;
+        const ImVec2 k1(b1.x - S(14), b1.y - S(14)), k0(k1.x - cardW, k1.y - cardH);
+        dl->AddRectFilled(k0, k1, withAlpha(col::abyss, 0.82f), S(6));
+        dl->AddRect(k0, k1, withAlpha(col::rail, 0.9f), S(6));
+        dl->AddText(fonts.label, fonts.label->FontSize, ImVec2(k0.x + pad, k0.y + pad), col::textHi, title);
+        const float x0 = k0.x + pad, y0 = k0.y + pad + fonts.label->FontSize + S(8) + fs * 0.25f, y1 = y0 + barH;
+        const int n = 48;
+        for (int i = 0; i < n; i++) {   // top = fastest
+            const uint32_t ct = colormapRGB(cm, 1.0 - (double)i / n), cb = colormapRGB(cm, 1.0 - (double)(i + 1) / n);
+            dl->AddRectFilledMultiColor(ImVec2(x0, y0 + barH * i / n), ImVec2(x0 + barW, y0 + barH * (i + 1) / n), hex(ct), hex(ct), hex(cb), hex(cb));
+        }
+        dl->AddRect(ImVec2(x0 - 1, y0 - 1), ImVec2(x0 + barW + 1, y1 + 1), withAlpha(col::rail, 0.9f));
+        for (double v = std::ceil(vlo / step) * step; v <= vhi + 1e-6; v += step) {
+            const float y = y1 - (float)((v - vlo) / span) * barH;
+            dl->AddLine(ImVec2(x0 + barW, y), ImVec2(x0 + barW + S(4), y), col::text);
+            std::snprintf(buf, sizeof(buf), "%.0f", v);
+            dl->AddText(f, fs, ImVec2(x0 + barW + S(8), y - fs * 0.5f), col::text, buf);
+        }
+        if (vhi - vlo < 1.0f) {   // one velocity: just its value
+            std::snprintf(buf, sizeof(buf), "%.0f", vlo);
+            dl->AddText(f, fs, ImVec2(x0 + barW + S(8), y0 + barH * 0.5f - fs * 0.5f), col::text, buf);
+        }
+    }
+
     dl->PopClipRect();
 }
 

@@ -52,6 +52,7 @@ private:
     void alert(const std::string& msg) { sim_.alerts.push_back(msg); }   // problem to read (modal)
     void pickModelFile(ModelQuantity q);
     void pickImageModel();
+    void saveModelFile();
     void sectionImageModel();
     void toggleSegy();
     void saveLocal();

@@ -513,6 +513,10 @@ void App::sectionMedium(double now) {
             if (sim_.loadModel(vel, GridModel{}, err)) notify("Yoğunluk artık hızdan (Gardner) hesaplanıyor.");
             else alert(err);
         }
+        if (ToolButton("  Modeli kaydet…", Btn::Secondary, ImVec2(w, 0),
+                       "Yüklü hız modelini (görselden, çizimden ya da dosyadan) kendi çözünürlüğünde SEG-Y olarak kaydeder. "
+                       "\"Hız modeli yükle…\" ile doğrudan geri açılır; yoğunluk modeli de yüklüyse yanına ayrı dosya yazılır."))
+            saveModelFile();
         if (ToolButton("  Modeli kaldır", Btn::Ghost, ImVec2(w, 0))) {
             sim_.clearModel();
             notify("Yüklenen model kaldırıldı; düz katman modeli kullanılıyor.");
@@ -523,6 +527,30 @@ void App::sectionMedium(double now) {
 }
 
 // ── Velocity model from an image: one velocity per gray level ──────────────
+void App::saveModelFile() {
+    const GridModel& v = sim_.modelVelocity();
+    const std::u8string su = std::filesystem::u8path(v.source).stem().u8string();
+    std::string stem(su.begin(), su.end());
+    if (stem.empty() || stem == "Çizim") stem = "hiz_modeli";
+    std::string path = pfd::save_file("Hız modelini kaydet", stem + ".segy", {"SEG-Y (*.segy *.sgy)", "*.segy *.sgy"}).result();
+    if (path.empty()) return;
+    const std::string ext = lowerExt(path);
+    if (ext != ".segy" && ext != ".sgy") path += ".segy";
+    std::string err;
+    if (!writeSegyModel(path, v, ModelQuantity::Velocity, err)) { alert(err); return; }
+    std::string note = "Hız modeli kaydedildi: " + baseName(path);
+    const GridModel& r = sim_.modelDensity();
+    if (!r.empty()) {   // the density model next to it: name_yogunluk.segy
+        const std::filesystem::path pp = std::filesystem::u8path(path);
+        const std::filesystem::path rp = pp.parent_path() / (pp.stem().u8string() + u8"_yogunluk" + pp.extension().u8string());
+        const std::u8string ru = rp.u8string();
+        const std::string rs(ru.begin(), ru.end());
+        if (!writeSegyModel(rs, r, ModelQuantity::Density, err)) { alert(err); return; }
+        note += " (yoğunluk: " + baseName(rs) + ")";
+    }
+    notify(note + ". \"Hız modeli yükle…\" ile geri açabilirsiniz.");
+}
+
 void App::pickImageModel() {
     auto files = pfd::open_file("Hız modeli için görsel seç", "",
                                 {"Görseller", "*.png *.jpg *.jpeg *.bmp *.gif *.tif *.tiff", "Tüm dosyalar", "*"}).result();
@@ -703,6 +731,17 @@ void App::sectionView() {
     bool draw = !p.sismo_only;
     if (Switch("Dalga alanını çiz", &draw, "Kapatınca yalnız kayıtlar güncellenir; simülasyon daha hızlı ilerler."))
         sim_.toggleSismoOnly();
+    {   // Model colours and the colour bar
+        static const char* maps[] = {"Deniz", "Turbo", "Viridis", "Magma", "Gri"};
+        int cm = std::clamp(p.model_colormap, 0, 4);
+        if (ComboRow("Model renk haritası", "##cmap", &cm, maps, 5, S(150))) {
+            p.model_colormap = cm;
+            sim_.onModelColormap();
+        }
+        Tip("Modeli hıza göre renklendiren harita. Turbo ve Viridis hız farklarını en net gösterir; Gri yazdırmaya uygundur.");
+        bool cbar = p.show_colorbar;
+        if (Switch("Hız renk ölçeği", &cbar, "Model görünümünün sağ altında hangi rengin hangi hız olduğunu gösterir.")) p.show_colorbar = cbar;
+    }
     bool skip = p.skip_gap;
     if (Switch("Kayıt bitince sonraki atışa geç", &skip,
                "Kayıt uzunluğu dolunca gemi bir sonraki atış konumuna kısa bir geçişle gelir ve yeni atış hemen başlar. "

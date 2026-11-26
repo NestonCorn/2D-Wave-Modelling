@@ -33,6 +33,10 @@ struct SegyModelInfo {
 };
 bool probeSegyModel(const std::string& path, SegyModelInfo& info, std::string& err);
 bool readSegyModel(const std::string& path, double dx, double dz, GridModel& out, std::string& err);
+// Writes a model as SEG-Y in the layout readSegyModel reads (one trace per column, IEEE
+// float, CDP X in cm, dz in mm in the sample-interval field): what "Hız modeli yükle" opens.
+// The quantity only labels the textual header.
+bool writeSegyModel(const std::string& path, const GridModel& m, ModelQuantity q, std::string& err);
 
 // Headerless float32. Column order: value(ix, iz) at ix * nz + iz (z fastest, the FWI
 // program's layout); row order: at iz * nx + ix (x fastest).

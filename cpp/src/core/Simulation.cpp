@@ -15,6 +15,7 @@
 #include "Cpml.hpp"
 #include "Material.hpp"
 #include "ParamsIO.hpp"
+#include "Colormap.hpp"
 #include "Report.hpp"
 #include "Segy.hpp"
 
@@ -293,26 +294,28 @@ double Simulation::seafloorDepth(double x) const {
 // Velocity image of an imported model (the built-in ones are drawn as layer polygons)
 void Simulation::createModelTexture() {
     if (modelTex) { glDeleteTextures(1, &modelTex); modelTex = 0; }
-    if (p.geology != GeologyModel::Imported || vsq.empty()) return;
-    struct Stop { float t, r, g, b; };
-    static const Stop stops[] = {{0.0f, 8, 22, 44}, {0.25f, 20, 52, 84}, {0.5f, 52, 92, 108},
-                                 {0.75f, 122, 118, 86}, {1.0f, 196, 170, 120}};
-    const double vlo = vminMs_, vhi = std::max(vminMs_ + 1.0, vmaxNorm_ * kVelocityNorm);
-    std::vector<uint32_t> px((size_t)W_sim * H_sim);
+    if (vsq.empty()) return;
+    // Every model, preset or loaded, coloured by velocity, so the colour bar reads true
     const int jSurf = sjSurf();
+    float lo = 1e30f, hi = 0;
+    for (int j = std::max(0, jSurf); j < H_sim; j++)
+        for (int i = 0; i < W_sim; i++) {
+            const float v = (float)(std::sqrt((double)vsq[(size_t)j * W_sim + i]) * kVelocityNorm);
+            lo = std::min(lo, v);
+            hi = std::max(hi, v);
+        }
+    if (hi < lo) lo = hi = 1500;
+    viewVelRange_ = {lo, hi};
+    const double span = std::max(1.0, (double)hi - lo);
+    const ModelColormap cm = (ModelColormap)std::clamp(p.model_colormap, 0, (int)ModelColormap::Count - 1);
+    std::vector<uint32_t> px((size_t)W_sim * H_sim);
     for (int j = 0; j < H_sim; j++)
         for (int i = 0; i < W_sim; i++) {
             const size_t idx = (size_t)j * W_sim + i;
             if (j < jSurf) { px[idx] = 0; continue; }   // sky stays the scene's own
             const double v = std::sqrt((double)vsq[idx]) * kVelocityNorm;
-            const float t = (float)std::clamp((v - vlo) / (vhi - vlo), 0.0, 1.0);
-            int k = 1;
-            while (k < 4 && t > stops[k].t) k++;
-            const Stop &a = stops[k - 1], &b = stops[k];
-            const float u = (t - a.t) / (b.t - a.t);
-            const uint32_t r = (uint32_t)(a.r + u * (b.r - a.r)), g = (uint32_t)(a.g + u * (b.g - a.g)),
-                           bl = (uint32_t)(a.b + u * (b.b - a.b));
-            px[idx] = r | g << 8 | bl << 16 | 0xFFu << 24;
+            const uint32_t c = colormapRGB(cm, (v - lo) / span);   // 0xRRGGBB -> RGBA bytes
+            px[idx] = (c >> 16 & 0xFF) | (c & 0xFF00) | (c & 0xFF) << 16 | 0xFFu << 24;
         }
     glGenTextures(1, &modelTex);
     glBindTexture(GL_TEXTURE_2D, modelTex);
@@ -500,6 +503,10 @@ void Simulation::toggleFreeSurface() {
 }
 
 void Simulation::toggleObs() { p.obs_enabled = !p.obs_enabled; }
+
+void Simulation::onModelColormap() {
+    if (glAvailable_) createModelTexture();
+}
 
 // ══════════════════════════════════════════════════════════════════════════
 // Setting handlers

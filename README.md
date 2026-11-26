@@ -28,6 +28,8 @@ Tek ekranlık bir çalışma istasyonu düzeni:
 - Hazır modeller: düz katmanlar, fay, tuz domu
 - Dosyadan hız ve (isteğe bağlı) yoğunluk modeli: SEG-Y (her iz bir sütun; dz örnek aralığından, dx iz koordinatlarından), başlıksız float32 (sütun ya da satır sırası, little/big-endian) ya da CSV/metin ızgarası (`;` ve ondalık virgül desteklenir)
 - Birim denetimi: km/s → m/s, kg/m³ → g/cm³
+- Yüklü model (görselden, çizimden ya da dosyadan) kendi çözünürlüğünde SEG-Y olarak kaydedilir ("Modeli kaydet…") ve "Hız modeli yükle…" ile doğrudan geri açılır; yoğunluk modeli varsa yanına ayrı dosya yazılır
+- Model görünümü hıza göre renklendirilir (Deniz, Turbo, Viridis, Magma, Gri); sağ altta hız renk ölçeği
 - Görselden model: PNG, JPG, BMP, GIF ya da TIFF (boyut sınırı yok; belleğe sığmayan görsel hata mesajıyla reddedilir); her piksel 0–255 gri değerine indirgenir, panelde görseldeki her gri ton listelenir ve her birine hız verilir
 - Model çizimi: katman sınırı (altını boyar), çizgi, fırça ve kova araçlarıyla model elle çizilir; her katmanın adı, rengi ve hızı vardır; geri al / ileri al, mevcut modeli çizime aktarma; çizim katmanları ve boyutuyla .json olarak kaydedilip yeniden açılabilir
 - Derinlik 0 deniz yüzeyidir; alan modelin boyutunu alır, deniz tabanı ve OBS konumları modelden bulunur
@@ -90,7 +92,8 @@ Başsız testler şunları denetler:
 - Dalgacık şekilleri, yayılan darbe; eikonal kutusu ve serbest yüzey açık/kapalıyken kaynak dalgacığı
 - Alıcı ara değerlemesi (izden ize varış zamanı ve genlik düzgünlüğü)
 - Yoğunluk: tek yoğunlukta sonucun değişmemesi, yoğunluk sınırında yansıma katsayısının (ρ₂ − ρ₁)/(ρ₂ + ρ₁) çıkması
-- Model dosyaları (SEG-Y IEEE/IBM, ham float32, CSV) ve modelin simülasyona yüklenmesi
+- Model dosyaları (SEG-Y IEEE/IBM, ham float32, CSV), modelin simülasyona yüklenmesi ve kaydedilen modelin birebir geri okunması
+- Renk haritaları (uç renkler, parlaklığın hızla artması, seçimin parametre dosyasında saklanması)
 - Görselden model (gri tonlar, aynı gri tona düşen renkler, simülasyona yükleme) ve model çizimi (sınır dolgusu, çizginin dolguyu durdurması, geri alma, katman silme, mevcut modelden katmanlar, çizim dosyasının kaydedilip açılması), 40 milyon pikselden büyük görsel
 - Dalgacığın basamaksız bitmesi, hareketli kaynağın ızgara gürültüsü üretmemesi
 - Sonraki atışa geçişin atış konumlarını ve kayıtları değiştirmemesi (Geleneksel ve CLO)

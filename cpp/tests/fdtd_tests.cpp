@@ -24,6 +24,7 @@
 #include "core/Wavelet.hpp"
 #include "core/ImageModel.hpp"
 #include "core/ModelCanvas.hpp"
+#include "core/Colormap.hpp"
 #include "core/Report.hpp"
 
 static int failures = 0;
@@ -985,6 +986,17 @@ static void testImageModel() {
     CHECK(a == 1500 && b == 2500 && c == 2500 && d == 4000, "velocities %.0f %.0f %.0f %.0f", a, b, c, d);
     const auto vr = sim.modelVelocityRange();   // kept from loadModel (the panel reads it every frame)
     CHECK(vr.first == 1500 && vr.second == 4000, "velocity range %.0f - %.0f", vr.first, vr.second);
+    {   // "Modeli kaydet": the loaded model as SEG-Y, opened again the way "Hız modeli yükle" does
+        const auto segy = dir / "image_model.segy";
+        const bool wrote = writeSegyModel(segy.string(), v, ModelQuantity::Velocity, err);
+        SegyModelInfo info;
+        GridModel back;
+        const bool read = wrote && probeSegyModel(segy.string(), info, err) && readSegyModel(segy.string(), info.dx, info.dz, back, err);
+        bool same = read && back.nx == v.nx && back.nz == v.nz && std::fabs(back.dx - v.dx) < 1e-6 && std::fabs(back.dz - v.dz) < 1e-6;
+        for (size_t i = 0; same && i < v.v.size(); i++) same = back.v[i] == v.v[i];
+        std::printf("  saved model: %dx%d, dx %g, dz %g read back %s\n", back.nx, back.nz, back.dx, back.dz, same ? "identical" : "DIFFERENT");
+        CHECK(same, "saved model does not read back: %s", err.c_str());
+    }
     CHECK(std::fabs(sim.p.domain_W - 1180) < 1 && std::fabs(sim.seafloorBelowSurface(300) - 190) <= 12,
           "domain / seafloor not taken from the image (%.0f m, %.0f m)", sim.p.domain_W, sim.seafloorBelowSurface(300));
     {   // Larger than the 40 million pixels once allowed, and read in several bands: a 24-bit
@@ -1143,6 +1155,41 @@ static void testBoundaryReflections() {
         std::printf("  %4.0f m/s, free surface %s, %2.0f Hz: %.2f %% of the record peak\n", c.v, c.fs ? "on " : "off", c.f, 100 * r);
         CHECK(r < c.limit, "boundary reflection %.2f %% (limit %.1f %%)", 100 * r, 100 * c.limit);
     }
+}
+
+// Colour maps of the model view: the reference end colours, brightness rising with velocity
+// (so the colour bar reads one way), and the choice kept in the parameter file
+static void testColormaps() {
+    std::printf("[colormaps] model view colour maps and the colour bar's scale\n");
+    auto near = [](uint32_t a, uint32_t b) {
+        for (int sh : {16, 8, 0}) if (std::abs((int)(a >> sh & 0xFF) - (int)(b >> sh & 0xFF)) > 6) return false;
+        return true;
+    };
+    CHECK(near(colormapRGB(ModelColormap::Viridis, 0), 0x440154) && near(colormapRGB(ModelColormap::Viridis, 1), 0xFDE725), "viridis ends");
+    CHECK(near(colormapRGB(ModelColormap::Magma, 0), 0x000004) && near(colormapRGB(ModelColormap::Magma, 1), 0xFCFDBF), "magma ends");
+    auto dominant = [](uint32_t c) { const int r = c >> 16 & 0xFF, g = c >> 8 & 0xFF, b = c & 0xFF; return b >= r && b >= g ? 2 : g >= r ? 1 : 0; };
+    CHECK(dominant(colormapRGB(ModelColormap::Turbo, 0.15)) == 2 && dominant(colormapRGB(ModelColormap::Turbo, 0.5)) == 1 &&
+              dominant(colormapRGB(ModelColormap::Turbo, 0.9)) == 0, "turbo: slow blue, middle green, fast red");
+    for (ModelColormap m : {ModelColormap::Viridis, ModelColormap::Magma, ModelColormap::Gray, ModelColormap::Ocean}) {
+        double prev = -1;
+        bool rising = true;
+        for (int i = 0; i <= 50; i++) {
+            const uint32_t c = colormapRGB(m, i / 50.0);
+            const double l = 0.2126 * (c >> 16 & 0xFF) + 0.7152 * (c >> 8 & 0xFF) + 0.0722 * (c & 0xFF);
+            if (l < prev - 0.5) rising = false;
+            prev = l;
+        }
+        std::printf("  %-8s brightness rises with velocity: %s\n", colormapName(m), rising ? "yes" : "NO");
+        CHECK(rising, "%s brightness does not rise", colormapName(m));
+    }
+    SimParams p;
+    p.model_colormap = 3;
+    p.show_colorbar = false;
+    SimParams q;
+    double shipX = 0;
+    std::string err;
+    const bool ok = paramsFromJson(paramsToJson(p, 500), q, shipX, err);
+    CHECK(ok && q.model_colormap == 3 && !q.show_colorbar, "colour map choice not kept in the parameter file");
 }
 
 // Changing the grid spacing after a run: the CPU engine respawns its workers when the thread
@@ -1690,6 +1737,7 @@ int main(int argc, char** argv) {
             }
         }
     }
+    if (argc > 1 && std::string(argv[1]) == "--colormaps") { testColormaps(); return failures ? 1 : 0; }
     if (argc > 1 && std::string(argv[1]) == "--boundaries") { testBoundaryReflections(); return failures ? 1 : 0; }
     if (argc > 1 && std::string(argv[1]) == "--regridtest") { testRegridAfterRun(); return failures ? 1 : 0; }
     if (argc > 3 && std::string(argv[1]) == "--gpusnap") {
@@ -1742,6 +1790,7 @@ int main(int argc, char** argv) {
     testReceiverInterpolation();
     testRegridAfterRun();
     testBoundaryReflections();
+    testColormaps();
     testPulseEnd();
     testSkipGap();
     testMovingSource();

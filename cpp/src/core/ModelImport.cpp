@@ -1,5 +1,6 @@
 #include "ModelImport.hpp"
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -7,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include "Segy.hpp"
 
 namespace fs = std::filesystem;
 
@@ -287,5 +289,29 @@ bool normalizeModelUnits(GridModel& m, ModelQuantity q, std::string& note, std::
             return false;
         }
     }
+    return true;
+}
+
+bool writeSegyModel(const std::string& path, const GridModel& m, ModelQuantity q, std::string& err) {
+    if (m.empty() || m.nx < 2 || m.nz < 2) { err = "Kaydedilecek model yok."; return false; }
+    if (m.nz > 32767) { err = "Model SEG-Y'ye yazılamıyor: iz başına en fazla 32767 örnek (düşey piksel) olabilir."; return false; }
+    if (!(m.dz > 0) || m.dz * 1000.0 > 65535.0) { err = "Model SEG-Y'ye yazılamıyor: düşey örnek aralığı 0 ile 65 m arasında olmalı."; return false; }
+    char b[96];
+    std::vector<std::string> text;
+    text.push_back(std::string("QUANTITY: ") + (q == ModelQuantity::Velocity ? "P-WAVE VELOCITY (M/S)" : "DENSITY (G/CM3)"));
+    std::string src;
+    for (char c : m.source) src += (unsigned char)c < 128 ? (char)std::toupper((unsigned char)c) : '_';   // EBCDIC header: ASCII only
+    text.push_back("SOURCE: " + src.substr(0, 60));
+    std::snprintf(b, sizeof(b), "COLUMNS (TRACES): %d  DX: %g M  (CDP X IN CM, SCALAR -100)", m.nx, m.dx);
+    text.push_back(b);
+    std::snprintf(b, sizeof(b), "SAMPLES PER TRACE: %d  DZ: %g M  (SAMPLE INTERVAL FIELD IN MM)", m.nz, m.dz);
+    text.push_back(b);
+    text.push_back("DEPTH 0 = SEA SURFACE");
+    std::snprintf(b, sizeof(b), "VALUE RANGE: %g - %g", m.minValue(), m.maxValue());
+    text.push_back(b);
+    const std::vector<uint8_t> seg = buildModelSegy(m.v.data(), m.nx, m.nz, m.dx, m.dz, text);   // v is column-major, as SEG-Y traces
+    std::ofstream o(std::filesystem::u8path(path), std::ios::binary);
+    if (o) o.write((const char*)seg.data(), (std::streamsize)seg.size());
+    if (!o) { err = "Dosya yazılamadı: " + path; return false; }
     return true;
 }

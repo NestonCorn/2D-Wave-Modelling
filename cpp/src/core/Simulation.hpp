@@ -79,6 +79,9 @@ public:
     const GridModel& modelDensity() const { return modelRho_; }
     // Velocity (m/s) and density (g/cm^3) ranges of the loaded model, kept from loadModel()
     std::pair<float, float> modelVelocityRange() const { return velRange_; }
+    // Velocity range (m/s) the model view is coloured over (below the sea surface, model grid)
+    std::pair<float, float> viewVelocityRange() const { return viewVelRange_; }
+    void onModelColormap();   // p.model_colormap changed: recolour the model view
     std::pair<float, float> modelDensityRange() const { return rhoRange_; }
     // Seafloor depth (m from the top of the domain) at x: OBS placement, drawing, SEG-Y
     // Seafloor at x on the canvas (y from the top of the domain, air strip included); what the
@@ -229,7 +232,7 @@ private:
     std::vector<float> obsXg_, obsYg_;         // OBS on the solver grid (metres from its corner)
     std::vector<float> vsqG_, rhoG_;           // model carried out into the absorbing pads
     int gW_ = 0, gH_ = 0, padX_ = 0, padT_ = 0, padB_ = 0;
-    std::pair<float, float> velRange_{0, 0}, rhoRange_{0, 0};
+    std::pair<float, float> velRange_{0, 0}, rhoRange_{0, 0}, viewVelRange_{1500, 1500};
     double accumulated_ = 0;
     double simTime_ = 0;             // simulated seconds since the cycle start (expanding-box clock; survives dt changes)
 
