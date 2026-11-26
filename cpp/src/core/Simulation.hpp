@@ -78,7 +78,10 @@ public:
     const GridModel& modelVelocity() const { return modelVel_; }
     const GridModel& modelDensity() const { return modelRho_; }
     // Seafloor depth (m from the top of the domain) at x: OBS placement, drawing, SEG-Y
+    // Seafloor at x on the canvas (y from the top of the domain, air strip included); what the
+    // solver places the OBS by. SEG-Y and reports want it below the sea surface.
     double seafloorDepth(double x) const;
+    double seafloorBelowSurface(double x) const { return seafloorDepth(x) - OCEAN_Y; }
 
     // ── SEG-Y live recording ──
     bool segyRecording() const { return segyRecording_; }
@@ -261,6 +264,7 @@ private:
         SegyLineWriter streamer, streamerSrc, obs;
     } line_;
     bool appendLineGathers(bool srcVessel, std::string& err);
+    void writeLineExtras();
 
     // Skipping the idle part of a live shot cycle: the record is complete but the ship has not
     // yet sailed one shot interval. The wave field is cleared and the ship glides the rest of

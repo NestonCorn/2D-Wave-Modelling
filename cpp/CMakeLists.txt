@@ -64,8 +64,10 @@ add_library(fdtd_core STATIC
     src/core/Segy.cpp
     src/core/ModelImport.cpp
     src/core/ParamsIO.cpp
+    src/core/Report.cpp
     src/core/Simulation.cpp)
 target_include_directories(fdtd_core PUBLIC src)
+target_include_directories(fdtd_core PRIVATE ${imgui_SOURCE_DIR})   # imstb_truetype.h (report fonts)
 target_link_libraries(fdtd_core PUBLIC glad nlohmann_json::nlohmann_json)
 
 if(MSVC)

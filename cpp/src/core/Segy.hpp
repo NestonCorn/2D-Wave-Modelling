@@ -23,6 +23,13 @@ struct SegySpec {
 
 std::vector<uint8_t> buildSegy(const SegySpec& s);
 
+// Depth model: one trace per column (columns[i * nz + k], x = i * dx, depth = k * dz), IEEE
+// float32. CDP, source and group X hold the column x in centimetres (coordinate scalar -100);
+// the sample-interval field holds dz in millimetres, the usual convention for depth data
+// (4000 = 4 m), so the app's model import reads the file back as it is. `text`: lines 2..
+// of the textual header (without the "Cnn " prefix).
+std::vector<uint8_t> buildModelSegy(const float* columns, int nx, int nz, double dx, double dz, const std::vector<std::string>& text);
+
 // One SEG-Y file holding every shot of a line: the file header is written from the first
 // shot, then append() adds each shot's traces (FFID = shotNum, trace sequence numbers run on
 // through the file). All shots must have the same samples per trace and sample interval.

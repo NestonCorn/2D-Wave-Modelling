@@ -212,3 +212,48 @@ bool SegyLineWriter::append(const SegySpec& shot, std::string& err) {
 void SegyLineWriter::close() {
     if (f_.is_open()) f_.close();
 }
+
+std::vector<uint8_t> buildModelSegy(const float* columns, int nx, int nz, double dx, double dz, const std::vector<std::string>& text) {
+    const size_t TB = 240 + (size_t)nz * 4;
+    std::vector<uint8_t> buf(3600 + (size_t)nx * TB, 0);
+    BE dv{buf.data()};
+    std::vector<std::string> lines = text;
+    lines.insert(lines.begin(), "C 1 SEG-Y REV1 - DEPTH MODEL FROM THE ACOUSTIC FDTD SIMULATOR");
+    for (size_t i = 1; i < lines.size(); i++) {
+        char tag[8];
+        std::snprintf(tag, sizeof(tag), "C%2d ", (int)(i + 1));
+        lines[i] = tag + lines[i];
+    }
+    while (lines.size() < 39) lines.push_back("C" + std::to_string(lines.size() + 1));
+    lines.resize(39);
+    lines.push_back("C40 END TEXTUAL HEADER");
+    SegySpec S;
+    S.nTraces = 1;
+    S.nSamples = nz;
+    S.dtMicros = 0;
+    writeFileHeader(buf.data(), S, lines, 1);
+    const unsigned dzField = (unsigned)std::lround(dz * 1000.0);   // depth data: millimetres
+    dv.u16(3200 + 16, dzField);
+    dv.u16(3200 + 18, dzField);
+    dv.i16(3200 + 28, 1);    // as recorded
+    for (int i = 0; i < nx; i++) {
+        const size_t th = 3600 + (size_t)i * TB;
+        const long long xcm = std::llround(i * dx * 100.0);
+        dv.i32(th + 0, i + 1);
+        dv.i32(th + 4, i + 1);
+        dv.i32(th + 8, 1);
+        dv.i32(th + 12, i + 1);
+        dv.i32(th + 20, i + 1);
+        dv.i16(th + 28, 1);
+        dv.i16(th + 68, 1);
+        dv.i16(th + 70, -100);   // coordinates in centimetres
+        dv.i32(th + 72, xcm);
+        dv.i32(th + 80, xcm);
+        dv.i16(th + 88, 1);
+        dv.i16(th + 114, nz);
+        dv.u16(th + 116, dzField);
+        dv.i32(th + 180, xcm);   // CDP X
+        for (int k = 0; k < nz; k++) dv.f32(th + 240 + (size_t)k * 4, columns[(size_t)i * nz + k]);
+    }
+    return buf;
+}

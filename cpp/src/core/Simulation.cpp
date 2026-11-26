@@ -15,6 +15,7 @@
 #include "Cpml.hpp"
 #include "Material.hpp"
 #include "ParamsIO.hpp"
+#include "Report.hpp"
 #include "Segy.hpp"
 
 namespace fs = std::filesystem;
@@ -1018,7 +1019,7 @@ void Simulation::segySnapshotAndSave() {
         const double sp = p.obs_spacing;
         s.receiver = [this, sp](int i) {
             double rx = (i + 1) * sp;
-            return SegyReceiver{rx, 0.0, seafloorDepth(rx)};
+            return SegyReceiver{rx, 0.0, seafloorBelowSurface(rx)};
         };
         files.push_back({std::string("shot_") + num + "_obs.segy", buildSegy(s)});
     }
@@ -1071,6 +1072,7 @@ bool Simulation::startLine(const LineSettings& s, std::string& err) {
     line_.shot = 0;
     line_.savedShipX = sxShip;
     line_.active = true;
+    writeLineExtras();   // model image, model SEG-Y and the PDF report
     beginLineShot();
     return true;
 }
@@ -1193,7 +1195,7 @@ bool Simulation::appendLineGathers(bool srcVessel, std::string& err) {
         const double sp = p.obs_spacing;
         s.receiver = [this, sp](int i) {
             double rx = (i + 1) * sp;
-            return SegyReceiver{rx, 0.0, seafloorDepth(rx)};
+            return SegyReceiver{rx, 0.0, seafloorBelowSurface(rx)};
         };
         if (!line_.obs.isOpen()) {
             const std::u8string u = (fs::u8path(base_dir) / "line_obs.segy").u8string();
@@ -1272,4 +1274,162 @@ bool Simulation::applyConfigJson(const std::string& text, std::string& err) {
     sxShip = shipX;
     sxSrc = sxShip + p.src_offset;
     return true;
+}
+
+// Next to the line's SEG-Y: the velocity model as an image and as SEG-Y (the grid the solver
+// uses, depth 0 = sea surface) and a PDF report of every parameter with the model image.
+// Failures here do not stop the line; they are reported as notices.
+void Simulation::writeLineExtras() {
+    const fs::path dir = fs::u8path(line_.dir);
+    auto u8 = [](const fs::path& q) { const std::u8string s = q.u8string(); return std::string(s.begin(), s.end()); };
+    std::vector<std::string> problems;
+
+    // Velocity on the grid from the sea surface down
+    const int j0 = std::clamp((int)std::ceil(OCEAN_Y / SCALE - 1e-9), 0, H_sim - 2);
+    const int nx = W_sim, nz = H_sim - j0;
+    std::vector<float> rows((size_t)nx * nz), cols((size_t)nx * nz);
+    float vmin = 1e30f, vmax = 0;
+    for (int k = 0; k < nz; k++)
+        for (int i = 0; i < nx; i++) {
+            const float v = (float)(std::sqrt((double)vsq[(size_t)(j0 + k) * W_sim + i]) * kVelocityNorm);
+            rows[(size_t)k * nx + i] = v;
+            cols[(size_t)i * nz + k] = v;
+            vmin = std::min(vmin, v);
+            vmax = std::max(vmax, v);
+        }
+
+    static const char* geoNames[] = {"Düz katmanlar", "Fay", "Tuz domu", "Dosyadan yüklenen"};
+    static const char* wavNames[] = {"Ricker (sıfır faz)", "Minimum faz", "Gauss", "Gauss 1. türevi"};
+    const std::string modelName = p.geology == GeologyModel::Imported && hasModel() ? modelVelocity().source
+                                                                                     : geoNames[std::clamp((int)p.geology, 0, 3)];
+    const bool twoShips = line_.mode != Mode::Trad;
+    const char* modeName = line_.mode == Mode::CLO ? "CLO (ardışık)" : line_.mode == Mode::SLO ? "SLO (eşzamanlı)" : "Geleneksel";
+    const double mps = p.ship_speed_knots * 0.514444;
+    const double lastX = line_.firstX + (line_.n - 1) * line_.interval;
+    char b[256];
+    auto fmt = [&](const char* f, auto... a) { std::snprintf(b, sizeof(b), f, a...); return std::string(b); };
+
+    // ── SEG-Y ──
+    {
+        const std::vector<std::string> text = {
+            "QUANTITY: P-WAVE VELOCITY (M/S)  MODEL: " + std::string(p.geology == GeologyModel::Imported ? "IMPORTED" : geoUpper(p.geology)),
+            fmt("COLUMNS (TRACES): %d  DX: %g M  (CDP X IN CM, SCALAR -100)", nx, SCALE),
+            fmt("SAMPLES PER TRACE: %d  DZ: %g M  (SAMPLE INTERVAL FIELD IN MM)", nz, SCALE),
+            fmt("DEPTH OF FIRST SAMPLE: %.2f M BELOW SEA SURFACE", j0 * SCALE - OCEAN_Y),
+            fmt("VELOCITY RANGE: %.0f - %.0f M/S", vmin, vmax),
+            "DATA FORMAT: IEEE 32-BIT FLOAT (FORMAT CODE 5)"};
+        const std::vector<uint8_t> seg = buildModelSegy(cols.data(), nx, nz, SCALE, SCALE, text);
+        std::ofstream o(dir / "model_velocity.segy", std::ios::binary);
+        if (o) o.write((const char*)seg.data(), (std::streamsize)seg.size());
+        if (!o) problems.push_back("model_velocity.segy");
+    }
+
+    // ── Image ──
+    report::ModelPlot mp;
+    mp.nx = nx; mp.nz = nz; mp.dx = SCALE; mp.dz = SCALE; mp.vel = rows.data();
+    mp.title = "Hız modeli: " + modelName;
+    mp.subtitle = fmt("%.0f × %.0f m, ızgara %g m  ·  hat: %d atış, %.0f – %.0f m, %s", (nx - 1) * SCALE, (nz - 1) * SCALE, SCALE,
+                      line_.n, line_.firstX, lastX, modeName);
+    mp.sourceDepth = p.source_depth;
+    for (int k = 0; k < line_.n; k++) {
+        const double x = line_.firstX + k * line_.interval;
+        mp.shotsMain.push_back(x);
+        // Where the source vessel fires: src_offset ahead, plus what the ship sails until then
+        if (line_.mode == Mode::SLO) mp.shotsSrc.push_back(x + p.src_offset + 25 * dtPhy() * mps);
+        if (line_.mode == Mode::CLO) mp.shotsSrc.push_back(x + p.src_offset + sismoSteps() * dtPhy() * mps);
+    }
+    mp.cable = true;
+    mp.cableX1 = line_.firstX - p.src_rec_dist;
+    mp.cableX0 = mp.cableX1 - p.cable_len;
+    mp.cableZ1 = p.cable_head_depth;
+    mp.cableZ0 = p.cable_tail_depth;
+    if (p.obs_enabled)
+        for (int i = 0; i < N_OBS; i++) {
+            const double x = (i + 1) * p.obs_spacing;
+            mp.obs.push_back({x, seafloorBelowSurface(x)});
+        }
+    report::Image img;
+    std::string err;
+    const bool haveImg = report::renderModel(mp, img, err);
+    if (!haveImg || !report::writePng(u8(dir / "model_velocity.png"), img, err))
+        problems.push_back("model_velocity.png");
+
+    // ── PDF ──
+    report::Document doc;
+    std::time_t t = std::time(nullptr);
+    std::tm tm{};
+    localtime_s(&tm, &t);
+    char when[64];
+    std::strftime(when, sizeof(when), "%d.%m.%Y %H:%M", &tm);
+    doc.title = "Hat simülasyonu raporu";
+    doc.subtitle = std::string("Oluşturma: ") + when + "  ·  Klasör: " + line_.dir;
+    doc.image = haveImg ? &img : nullptr;
+    doc.imageCaption = "Hız modeli (çözücünün kullandığı ızgara, derinlik deniz yüzeyinden) ve hat geometrisi: kırmızı noktalar ana kaynak "
+                       "atışları" + std::string(twoShips ? ", mavi noktalar kaynak gemisi atışları" : "") +
+                       ", sarı çizgi ilk atıştaki streamer" + (p.obs_enabled ? ", üçgenler OBS." : ".");
+    using report::Row;
+    const NumericalStatus ns = numericalStatus();
+    report::Section line{"Hat", {}};
+    line.rows = {{"Atış kipi", modeName},
+                 {"Atış sayısı", std::to_string(line_.n)},
+                 {"İlk atış konumu (ana kaynak)", fmt("%.1f m", line_.firstX)},
+                 {"Son atış konumu", fmt("%.1f m", lastX)},
+                 {"Atış aralığı", fmt("%.2f m", line_.interval)},
+                 {"Hat uzunluğu", fmt("%.1f m", lastX - line_.firstX)},
+                 {"Gemi hızı", fmt("%.1f knot (%.2f m/s)", p.ship_speed_knots, mps)},
+                 {"Geminin bir kayıtta aldığı yol", fmt("%.1f m", mps * p.sismo_ms / 1000.0 * (line_.mode == Mode::CLO ? 2 : 1))}};
+    if (twoShips) line.rows.push_back({"Kaynak gemisi (ana kaynağın önünde)", fmt("%.0f m", p.src_offset)});
+    report::Section rec{"Kayıt", {}};
+    rec.rows = {{"Kayıt uzunluğu", fmt("%d ms", p.sismo_ms)},
+                {"SEG-Y örnek aralığı", "1 ms"},
+                {"Streamer kanal sayısı", std::to_string(N_REC)},
+                {"OBS kanal sayısı", p.obs_enabled ? std::to_string(N_OBS) : std::string("kapalı")}};
+    report::Section src{"Kaynak ve dalgacık", {}};
+    src.rows = {{"Dalgacık", wavNames[std::clamp((int)p.wavelet, 0, 3)]},
+                {"Baskın frekans", fmt("%.1f Hz", p.freq)},
+                {"Kaynak genliği", fmt("%.1f", p.amp)},
+                {"Kaynak derinliği", fmt("%.0f m", p.source_depth)}};
+    report::Section geo{"Saha geometrisi", {}};
+    geo.rows = {{"Kablo boyu", fmt("%.0f m", p.cable_len)},
+                {"Alıcı grup aralığı", fmt("%g m", p.receiver_spacing)},
+                {"Kablo baş derinliği", fmt("%.0f m", p.cable_head_depth)},
+                {"Kablo son derinliği", fmt("%.0f m", p.cable_tail_depth)},
+                {"Gemi – kaynak uzaklığı", fmt("%.0f m", p.ship_src_dist)},
+                {"Kaynak – ilk alıcı uzaklığı (yakın ofset)", fmt("%.0f m", p.src_rec_dist)},
+                {"Uzak ofset", fmt("%.0f m", p.src_rec_dist + p.cable_len)},
+                {"OBS aralığı", p.obs_enabled ? fmt("%.0f m", p.obs_spacing) : std::string("OBS kapalı")}};
+    report::Section med{"Ortam ve yeraltı modeli", {}};
+    med.rows = {{"Hız modeli", modelName},
+                {"Hız aralığı", fmt("%.0f – %.0f m/s", vmin, vmax)},
+                {"Yoğunluk", p.geology == GeologyModel::Imported && !modelDensity().empty() ? modelDensity().source
+                                                                                          : std::string("Gardner, ρ = 0.31·V^0.25; su 1.03 g/cm³")},
+                {"Alan genişliği", fmt("%.0f m", (W_sim - 1) * SCALE)},
+                {"Alan derinliği (deniz yüzeyinden)", fmt("%.0f m", (nz - 1) * SCALE)},
+                {"Deniz yüzeyi yansıması", p.free_surface ? "açık (serbest yüzey)" : "kapalı (soğurucu)"}};
+    report::Section numSec{"Sayısal çözüm", {}};
+    numSec.rows = {{"Türev derecesi", fmt("%d. derece", p.fd_order)},
+                {"Izgara aralığı", fmt("%g m", SCALE)},
+                {"Izgara", fmt("%d × %d hücre", W_sim, H_sim)},
+                {"Zaman adımı katsayısı", fmt("%.2f", p.dt)},
+                {"Zaman adımı", fmt("%.4f ms", dtPhy() * 1000.0)},
+                {"Soğurucu sınır", fmt("%d hücre", p.npml)},
+                {"Genişleyen hesap kutusu", p.expanding_box ? "açık" : "kapalı"},
+                {"CFL oranı", fmt("%%%d (sınır katsayı %.2f)", (int)std::lround(ns.cfl_ratio * 100), ns.dt_max)},
+                {"Dalga boyu başına nokta", fmt("%.1f (en az %d)", ns.ppw, ns.min_ppw)},
+                {"Hesaplama motoru", usingGpu() ? "GPU" : "CPU"}};
+    report::Section files{"Klasördeki dosyalar", {}};
+    files.rows = {{"line_streamer.segy", "ana gemi streamer kayıtları, her atış bir ensemble"}};
+    if (line_.mode == Mode::CLO) files.rows.push_back({"line_streamer_src.segy", "kaynak gemisi atışlarının streamer kayıtları"});
+    if (p.obs_enabled) files.rows.push_back({"line_obs.segy", "OBS kayıtları"});
+    files.rows.push_back({"model_velocity.segy", "hız modeli, her iz bir sütun, örnek aralığı dz (mm)"});
+    files.rows.push_back({"model_velocity.png", "hız modeli ve hat geometrisi görseli"});
+    files.rows.push_back({"line_report.pdf", "bu rapor"});
+    doc.sections = {line, rec, src, geo, med, numSec, files};
+    if (!report::writePdf(u8(dir / "line_report.pdf"), doc, err)) problems.push_back("line_report.pdf");
+
+    if (!problems.empty()) {
+        std::string s = "Hat raporu dosyalarından bazıları yazılamadı:";
+        for (const auto& q : problems) s += " " + q;
+        notices.push_back(s + (err.empty() ? "" : " (" + err + ")"));
+    }
 }

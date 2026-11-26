@@ -966,6 +966,50 @@ static void testLineExport() {
     CHECK(ns == 300 && dtUs == 1000, "samples %d / interval %d", ns, dtUs);
     CHECK(ffidOk == (int)nTr && sxOk == (int)nTr && seqOk == (int)nTr, "headers: FFID %d, source X %d, sequence %d of %zu",
           ffidOk, sxOk, seqOk, nTr);
+    {   // OBS water depth (bytes 65-68): the seafloor below the sea surface, not from the top of
+        // the domain (that counted the ~80 m air strip above the sea in)
+        Simulation ref;
+        ref.p.sismo_ms = 300;
+        ref.OCEAN_Y = ref.p.domain_H * 0.166;
+        ref.init(false);
+        const size_t nObs1 = nObsTr / 3;
+        int ok = 0;
+        double worst = 0;
+        for (size_t i = 0; i < nObs1; i++) {
+            const double x = (i + 1) * ref.p.obs_spacing;
+            const double want = ref.seafloorDepth(x) - ref.OCEAN_Y;
+            const double got = be32(ob, 3600 + i * TB + 64);
+            worst = std::max(worst, std::fabs(got - want));
+            ok += std::fabs(got - want) <= 0.5 && got > 0;
+        }
+        std::printf("  OBS water depth in the headers: %d of %zu match the seafloor below the sea surface (worst %.2f m)\n", ok, nObs1, worst);
+        CHECK(ok == (int)nObs1, "OBS depth headers off by up to %.1f m", worst);
+    }
+    {   // model image, model SEG-Y (read back with the app's import) and the PDF report
+        const auto d = std::filesystem::u8path(dir3);
+        const auto png = readFile(d / "model_velocity.png"), pdf = readFile(d / "line_report.pdf");
+        const bool pngOk = png.size() > 1000 && png[1] == 'P' && png[2] == 'N' && png[3] == 'G';
+        const std::string pdfHead(pdf.begin(), pdf.begin() + std::min<size_t>(8, pdf.size()));
+        const std::string pdfTail(pdf.end() - std::min<size_t>(6, pdf.size()), pdf.end());
+        const bool pdfOk = pdf.size() > 1000 && pdfHead.rfind("%PDF-", 0) == 0 && pdfTail.find("%%EOF") != std::string::npos;
+        GridModel m;
+        std::string err;
+        SegyModelInfo info;
+        const std::u8string mp = (d / "model_velocity.segy").u8string();
+        const std::string mps(mp.begin(), mp.end());
+        const bool probed = probeSegyModel(mps, info, err);
+        const bool read = probed && readSegyModel(mps, info.dx, info.dz, m, err);
+        std::printf("  report: png %zu bytes, pdf %zu bytes; model SEG-Y %dx%d dx=%g dz=%g, %.0f - %.0f m/s\n", png.size(), pdf.size(),
+                    m.nx, m.nz, m.dx, m.dz, read ? m.minValue() : 0.0, read ? m.maxValue() : 0.0);
+        CHECK(pngOk, "model_velocity.png missing or not a PNG");
+        CHECK(pdfOk, "line_report.pdf missing or not a PDF");
+        CHECK(read && m.nx == 301 && m.dx == 4 && m.dz == 4 && std::fabs(m.minValue() - 1500) < 1 && std::fabs(m.maxValue() - 4080) < 1,
+              "model SEG-Y does not read back: %s", err.c_str());
+        if (const char* keep = std::getenv("FDTD_KEEP_LINE")) {   // copy the outputs out for a look
+            for (const char* n : {"model_velocity.png", "line_report.pdf", "model_velocity.segy"})
+                std::filesystem::copy_file(d / n, std::filesystem::u8path(keep) / n, std::filesystem::copy_options::overwrite_existing, ec);
+        }
+    }
     // shot 2 of the line == a line of only that shot
     const std::string dir1 = runLine(550, 1, 50, root / "b", alert);
     CHECK(!dir1.empty(), "single-shot line did not finish: %s", alert.c_str());

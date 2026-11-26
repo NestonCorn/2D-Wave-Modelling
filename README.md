@@ -48,6 +48,7 @@ Tek ekranlık bir çalışma istasyonu düzeni:
 - Seçili atış kipiyle çalışır: Geleneksel tek kaynak; SLO'da kaynak gemisi aynı kayda atar; CLO'da ana kayıttan sonra kaynak gemisi atar ve ikinci bir kayıt alınır
 - Gemi kayıt boyunca ilerler, kablo onunla gider; her kaynak attığı yerde kalır. Her istasyon sessiz dalga alanından başlar
 - Atışlar `line_streamer.segy`, `line_obs.segy` ve CLO'da `line_streamer_src.segy` dosyalarına eklenir (FFID, atış anındaki kaynak ve alıcı koordinatları, 1 ms örnek aralığı)
+- Klasöre ayrıca `model_velocity.png` (renk ölçekli hız modeli, atışlar, streamer ve OBS ile), `model_velocity.segy` (çözücünün kullandığı hız ızgarası; uygulamaya yeniden yüklenebilir) ve `line_report.pdf` (model görseli ve bütün parametreler) yazılır
 
 ## Performans
 
@@ -89,7 +90,7 @@ Başsız testler şunları denetler:
 - Model dosyaları (SEG-Y IEEE/IBM, ham float32, CSV) ve modelin simülasyona yüklenmesi
 - Dalgacığın basamaksız bitmesi, hareketli kaynağın ızgara gürültüsü üretmemesi
 - Sonraki atışa geçişin atış konumlarını ve kayıtları değiştirmemesi (Geleneksel ve CLO)
-- Hat simülasyonu (iz başlıkları, atışların birbirinden bağımsızlığı, SLO ve CLO kayıtları), SEG-Y düzeni ve JSON gidiş-dönüşü
+- Hat simülasyonu (iz başlıkları, OBS su derinliği, atışların birbirinden bağımsızlığı, SLO ve CLO kayıtları, model görseli, model SEG-Y'sinin geri okunması, PDF raporu), SEG-Y düzeni ve JSON gidiş-dönüşü
 
 `--bench` ile hız ölçümü de çalışır. Ortam değişkenleri: `FDTD_PIPELINE=0` CPU zaman bloklamasını kapatır, `FDTD_TILE=64x4` GPU iş grubu boyutunu değiştirir.
 
