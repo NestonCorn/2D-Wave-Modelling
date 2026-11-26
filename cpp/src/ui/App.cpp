@@ -597,8 +597,14 @@ void App::sectionImageModel() {
     const float w = ImGui::GetContentRegionAvail().x;
     if (ToolButton("Hız modelini oluştur", Btn::Secondary, ImVec2(w, 0), "Hız modeli bu görselden kurulur; yoğunluk hızdan (Gardner) hesaplanır.")) {
         std::string err;
-        GridModel m = modelFromGray(s.img, s.vel, s.widthM, s.depthM, s.name);
-        if (sim_.loadModel(std::move(m), GridModel{}, err)) {
+        bool ok = false;
+        try {
+            GridModel m = modelFromGray(s.img, s.vel, s.widthM, s.depthM, s.name);
+            ok = sim_.loadModel(std::move(m), GridModel{}, err);
+        } catch (const std::bad_alloc&) {
+            err = "Model belleğe sığmadı; daha küçük bir görselle deneyin.";
+        }
+        if (ok) {
             std::snprintf(b, sizeof(b), "Görselden hız modeli kuruldu: %s, %zu ton, %.0f × %.0f m.", s.name.c_str(), levels.size(), s.widthM,
                           s.depthM);
             notify(b);

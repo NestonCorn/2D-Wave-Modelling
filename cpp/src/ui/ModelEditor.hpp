@@ -22,6 +22,8 @@ private:
     void tools(Simulation& sim, const std::function<void(const std::string&)>& notify, const std::function<void(const std::string&)>& alert);
     void canvasPane(ImVec2 size);
     void finishPoints();
+    void saveDrawing(const std::function<void(const std::string&)>& alert, const std::function<void(const std::string&)>& notify);
+    void openDrawing(const std::function<void(const std::string&)>& alert, const std::function<void(const std::string&)>& notify);
     void resizeToModel();
     void upload();
 
@@ -39,6 +41,8 @@ private:
     bool dirty_ = true;
     std::vector<uint32_t> rgba_;
     std::string hover_;
+    std::string error_;           // last problem, shown in the bottom bar
+    void fail(const std::string& m) { error_ = m; }
 };
 
 } // namespace ui

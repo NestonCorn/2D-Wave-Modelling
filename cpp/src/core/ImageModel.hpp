@@ -16,7 +16,8 @@ struct GrayImage {
     std::vector<int> levels() const;       // gray levels present, ascending
 };
 
-// PNG, JPEG, BMP, GIF (first frame) or TIFF through the Windows Imaging Component
+// PNG, JPEG, BMP, GIF (first frame) or TIFF through the Windows Imaging Component. No size
+// limit; an image that does not fit in memory fails with a message instead of a crash.
 bool loadGrayImage(const std::string& utf8Path, GrayImage& out, std::string& err);
 
 // value(ix, iz) = velocity[gray at column ix, row iz]; dx, dz from the given size in metres

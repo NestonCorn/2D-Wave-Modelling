@@ -985,6 +985,31 @@ static void testImageModel() {
     CHECK(a == 1500 && b == 2500 && c == 2500 && d == 4000, "velocities %.0f %.0f %.0f %.0f", a, b, c, d);
     CHECK(std::fabs(sim.p.domain_W - 1180) < 1 && std::fabs(sim.seafloorBelowSurface(300) - 190) <= 12,
           "domain / seafloor not taken from the image (%.0f m, %.0f m)", sim.p.domain_W, sim.seafloorBelowSurface(300));
+    {   // Larger than the 40 million pixels once allowed, and read in several bands: a 24-bit
+        // BMP of 24000 x 3000 (72 Mpx), left half black, right half white, one gray row in the middle
+        const int W = 24000, H = 3000, stride = W * 3;
+        const auto bmp = dir / "big.bmp";
+        {
+            std::ofstream f(bmp, std::ios::binary);
+            auto u32 = [&](uint32_t v) { f.write((const char*)&v, 4); };
+            auto u16 = [&](uint16_t v) { f.write((const char*)&v, 2); };
+            f.write("BM", 2); u32(54u + (uint32_t)stride * H); u32(0); u32(54);
+            u32(40); u32(W); u32((uint32_t)-H); u16(1); u16(24); u32(0); u32((uint32_t)stride * H); u32(2835); u32(2835); u32(0); u32(0);
+            std::vector<uint8_t> row(stride);
+            for (int y = 0; y < H; y++) {
+                for (int x = 0; x < W; x++) std::memset(&row[(size_t)x * 3], y == H / 2 ? 128 : x < W / 2 ? 0 : 255, 3);
+                f.write((const char*)row.data(), stride);
+            }
+        }
+        GrayImage big;
+        const bool okBig = loadGrayImage(bmp.string(), big, err);
+        std::printf("  %dx%d BMP (%.0f Mpx): %s, levels 0: %d, 128: %d, 255: %d px\n", W, H, W * (double)H / 1e6, okBig ? "read" : err.c_str(),
+                    big.count[0], big.count[128], big.count[255]);
+        CHECK(okBig && big.w == W && big.h == H && big.count[128] == W && big.count[0] == (H - 1) * (W / 2) && big.count[255] == (H - 1) * (W / 2)
+                  && big.gray[(size_t)(H / 2) * W + 7] == 128 && big.gray[(size_t)(H - 1) * W + W - 1] == 255,
+              "large image not read correctly: %s", err.c_str());
+        std::filesystem::remove(bmp, ec);
+    }
     // Not an image
     const auto txt = dir / "not_an_image.png";
     { std::ofstream(txt) << "hello"; }
@@ -1039,6 +1064,27 @@ static void testModelCanvas() {
     std::printf("\n");
     CHECK(c2.palette.size() == 4 && c2.palette.front().velocity == 1500 && c2.palette.back().velocity == 4080,
           "salt model gave %zu layers", c2.palette.size());
+
+    // Drawing file: save, open into another canvas, identical; bad files rejected untouched
+    cv.palette[1].name = "Şeyl ğüıöç";
+    cv.palette[1].rgb = 0x12AB34;
+    const std::string js = cv.toJson(1234.5, 567);
+    ModelCanvas c3;
+    double w3 = 0, d3 = 0;
+    std::string err;
+    const bool opened = c3.fromJson(js, w3, d3, err);
+    bool same = opened && c3.w == cv.w && c3.h == cv.h && c3.px == cv.px && c3.palette.size() == cv.palette.size();
+    for (size_t i = 0; same && i < cv.palette.size(); i++)
+        same = c3.palette[i].name == cv.palette[i].name && c3.palette[i].velocity == cv.palette[i].velocity && c3.palette[i].rgb == cv.palette[i].rgb;
+    std::printf("  drawing file: %zu bytes for %dx%d pixels, %zu layers; read back %s\n", js.size(), cv.w, cv.h, cv.palette.size(),
+                same ? "identical" : "DIFFERENT");
+    CHECK(same && w3 == 1234.5 && d3 == 567, "drawing file did not round-trip: %s", err.c_str());
+    ModelCanvas c4 = c3;
+    double w4 = 1, d4 = 1;
+    CHECK(!c4.fromJson("{not json", w4, d4, err) && !c4.fromJson("{\"format\":\"something else\"}", w4, d4, err), "bad files accepted");
+    std::string cut = js;
+    cut.replace(cut.find("\"pixels_rle\""), std::string::npos, "\"pixels_rle\": [0, 5]}");
+    CHECK(!c4.fromJson(cut, w4, d4, err) && c4.px == c3.px && w4 == 1, "a truncated drawing changed the canvas (%s)", err.c_str());
 }
 
 static void testLineExport() {

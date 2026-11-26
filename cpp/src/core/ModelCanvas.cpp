@@ -2,7 +2,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <map>
+#include <nlohmann/json.hpp>
 
 void ModelCanvas::initDefault(int width, int height) {
     palette = {{"Su", 1500, 0x2E6DB4},         {"Tortul 1", 2000, 0xD8C48E}, {"Tortul 2", 2400, 0xB0925E},
@@ -219,4 +221,86 @@ void ModelCanvas::fromVelocity(const float* vel, int nx, int nz, int width, int 
     }
     undo_.clear();
     redo_.clear();
+}
+
+// ── Drawing file ──────────────────────────────────────────────────────────
+std::string ModelCanvas::toJson(double widthM, double depthM) const {
+    nlohmann::ordered_json j;
+    j["format"] = "seismic-fdtd-model-drawing";
+    j["version"] = 1;
+    j["width_m"] = widthM;
+    j["depth_m"] = depthM;
+    j["columns"] = w;
+    j["rows"] = h;
+    auto pal = nlohmann::ordered_json::array();
+    for (const PaletteEntry& e : palette) {
+        char c[8];
+        std::snprintf(c, sizeof(c), "#%06X", e.rgb & 0xFFFFFF);
+        pal.push_back({{"name", e.name}, {"velocity_ms", e.velocity}, {"color", c}});
+    }
+    j["layers"] = pal;
+    // Run lengths over the raster in row order: value, count, value, count, ...
+    auto rle = nlohmann::ordered_json::array();
+    for (size_t i = 0; i < px.size();) {
+        size_t k = i;
+        while (k < px.size() && px[k] == px[i]) k++;
+        rle.push_back(px[i]);
+        rle.push_back(k - i);
+        i = k;
+    }
+    j["pixels_rle"] = rle;
+    return j.dump(1);
+}
+
+bool ModelCanvas::fromJson(const std::string& text, double& widthM, double& depthM, std::string& err) {
+    nlohmann::json j;
+    try {
+        j = nlohmann::json::parse(text);
+    } catch (const std::exception&) {
+        err = "Dosya okunamadı (geçerli bir JSON değil).";
+        return false;
+    }
+    try {
+        if (j.value("format", std::string()) != "seismic-fdtd-model-drawing") { err = "Bu dosya bir model çizimi değil."; return false; }
+        const int cw = j.at("columns").get<int>(), ch = j.at("rows").get<int>();
+        const double mw = j.at("width_m").get<double>(), md = j.at("depth_m").get<double>();
+        if (cw < 2 || ch < 2 || (long long)cw * ch > 100000000ll || !(mw > 0) || !(md > 0)) { err = "Çizimin boyutu geçersiz."; return false; }
+        std::vector<PaletteEntry> pal;
+        for (const auto& e : j.at("layers")) {
+            PaletteEntry p;
+            p.name = e.value("name", std::string("Katman"));
+            p.velocity = e.at("velocity_ms").get<float>();
+            const std::string c = e.value("color", std::string("#808080"));
+            p.rgb = c.size() == 7 && c[0] == '#' ? (uint32_t)std::strtoul(c.c_str() + 1, nullptr, 16) : 0x808080;
+            if (!(p.velocity > 0)) { err = "Bir katmanın hızı geçersiz: " + p.name; return false; }
+            pal.push_back(p);
+        }
+        if (pal.empty() || pal.size() > 256) { err = "Katman sayısı 1 ile 256 arasında olmalı."; return false; }
+        const auto& rle = j.at("pixels_rle");
+        if (!rle.is_array() || rle.size() % 2) { err = "Çizimin piksel verisi bozuk."; return false; }
+        std::vector<uint8_t> raster;
+        raster.reserve((size_t)cw * ch);
+        for (size_t i = 0; i < rle.size(); i += 2) {
+            const int v = rle[i].get<int>();
+            const long long n = rle[i + 1].get<long long>();
+            if (v < 0 || v >= (int)pal.size() || n < 1 || (long long)raster.size() + n > (long long)cw * ch) {
+                err = "Çizimin piksel verisi bozuk.";
+                return false;
+            }
+            raster.insert(raster.end(), (size_t)n, (uint8_t)v);
+        }
+        if (raster.size() != (size_t)cw * ch) { err = "Çizimin piksel verisi eksik."; return false; }
+        w = cw;
+        h = ch;
+        px = std::move(raster);
+        palette = std::move(pal);
+        widthM = mw;
+        depthM = md;
+        undo_.clear();
+        redo_.clear();
+        return true;
+    } catch (const std::exception&) {
+        err = "Dosyada beklenen alanlar eksik ya da hatalı.";
+        return false;
+    }
 }

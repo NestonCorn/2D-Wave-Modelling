@@ -5,7 +5,10 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
+#include <portable-file-dialogs.h>
 #include "core/Material.hpp"
+#include "core/ParamsIO.hpp"
 
 namespace ui {
 
@@ -98,6 +101,36 @@ void ModelEditor::resizeToModel() {
     dirty_ = true;
 }
 
+void ModelEditor::saveDrawing(const std::function<void(const std::string&)>& alert, const std::function<void(const std::string&)>& notify) {
+    std::string path = pfd::save_file("Model çizimini kaydet", "model_cizimi.json", {"Model çizimi (*.json)", "*.json"}).result();
+    if (path.empty()) return;
+    if (path.size() < 5 || path.substr(path.size() - 5) != ".json") path += ".json";
+    if (!writeTextFile(path, cv_.toJson(widthM_, depthM_))) { fail("Dosya yazılamadı: " + path); return; }
+    const std::u8string n = std::filesystem::u8path(path).filename().u8string();
+    error_.clear();
+    notify("Model çizimi kaydedildi: " + std::string(n.begin(), n.end()));
+}
+
+void ModelEditor::openDrawing(const std::function<void(const std::string&)>& alert, const std::function<void(const std::string&)>& notify) {
+    auto files = pfd::open_file("Model çizimi aç", "", {"Model çizimi (*.json)", "*.json", "Tüm dosyalar", "*"}).result();
+    if (files.empty()) return;
+    std::string text, err;
+    if (!readTextFile(files[0], text)) { fail("Dosya okunamadı: " + files[0]); return; }
+    double w = widthM_, d = depthM_;
+    if (!cv_.fromJson(text, w, d, err)) { fail(err); return; }
+    widthM_ = (float)w;
+    depthM_ = (float)d;
+    sel_ = std::min(sel_, (int)cv_.palette.size() - 1);
+    pts_.clear();
+    dirty_ = true;
+    const std::u8string n = std::filesystem::u8path(files[0]).filename().u8string();
+    char b[200];
+    std::snprintf(b, sizeof(b), "Model çizimi açıldı: %s (%zu katman, %.0f × %.0f m)", std::string(n.begin(), n.end()).c_str(), cv_.palette.size(),
+                  widthM_, depthM_);
+    error_.clear();
+    notify(b);
+}
+
 void ModelEditor::finishPoints() {
     if (pts_.empty()) return;
     cv_.snapshot();
@@ -155,6 +188,16 @@ void ModelEditor::frame(Simulation& sim, double now, const std::function<void(co
                 dirty_ = true;
             }
             ImGui::EndDisabled();
+            // Open / save the drawing, left of undo / redo with a little more room between the groups
+            const char* openL = "  Aç…";
+            const char* saveL = "  Kaydet…";
+            const float ow = ButtonWidth(openL), sw = ButtonWidth(saveL);
+            const float x0 = right - uw - rw - S(8) - S(24) - ow - sw - S(8);
+            ImGui::SetCursorPos(ImVec2(x0, y0));
+            if (ToolButton(openL, Btn::Secondary, ImVec2(ow, bh), "Kaydedilmiş bir model çizimini (.json) açar.")) openDrawing(alert, notify);
+            ImGui::SetCursorPos(ImVec2(x0 + ow + S(8), y0));
+            if (ToolButton(saveL, Btn::Secondary, ImVec2(sw, bh), "Çizimi katmanları, renkleri, hızları ve model boyutuyla bir .json dosyasına kaydeder."))
+                saveDrawing(alert, notify);
         }
         ImGui::Dummy(ImVec2(0, S(4)));
         const ImVec2 avail = ImGui::GetContentRegionAvail();
@@ -172,7 +215,11 @@ void ModelEditor::frame(Simulation& sim, double now, const std::function<void(co
             for (int c : cv_.counts()) used += c > 0;
             char b[160];
             std::snprintf(b, sizeof(b), "%d katman kullanılıyor  ·  %.0f × %.0f m", used, widthM_, depthM_);
-            ImGui::GetWindowDrawList()->AddText(ImVec2(b0.x, by + (S(36) - ImGui::GetTextLineHeight()) * 0.5f), col::muted, b);
+            // A problem shows here: an alert window over this modal one would close it
+            const bool showErr = !error_.empty();
+            ImGui::GetWindowDrawList()->AddText(nullptr, 0.0f, ImVec2(b0.x, by + (S(36) - ImGui::GetTextLineHeight()) * 0.5f),
+                                                showErr ? col::danger : col::muted, showErr ? error_.c_str() : b, nullptr,
+                                                avail.x - ButtonWidth("Modeli oluştur") - ButtonWidth("Kapat") - S(70));
             ImGui::SetCursorScreenPos(ImVec2(b0.x + avail.x - bw - cw - S(10), by));
             if (ToolButton("Kapat", Btn::Secondary, ImVec2(cw, S(36)), "Çizim saklanır; yeniden açınca kaldığı yerden devam eder.")) close_ = true;
             ImGui::SetCursorScreenPos(ImVec2(b0.x + avail.x - bw, by));
@@ -182,7 +229,7 @@ void ModelEditor::frame(Simulation& sim, double now, const std::function<void(co
                     std::snprintf(b, sizeof(b), "Çizilen model yüklendi: %d katman, %.0f × %.0f m.", used, widthM_, depthM_);
                     notify(b);
                     close_ = true;
-                } else alert(err);
+                } else fail(err);
             }
         }
         if (close_) {

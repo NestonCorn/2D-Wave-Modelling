@@ -59,6 +59,12 @@ public:
     // rest go to the nearest of those)
     void fromVelocity(const float* vel, int nx, int nz, int width, int height);
 
+    // Drawing file (JSON): model size, palette (name, colour, velocity) and the raster as
+    // run lengths over the rows (a layered drawing is a few thousand numbers). fromJson() checks
+    // everything before it changes the canvas and clears undo / redo on success.
+    std::string toJson(double widthM, double depthM) const;
+    bool fromJson(const std::string& text, double& widthM, double& depthM, std::string& err);
+
 private:
     struct Snap { int w, h; std::vector<uint8_t> px; };
     std::vector<Snap> undo_, redo_;
