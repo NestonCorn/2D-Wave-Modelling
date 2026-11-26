@@ -63,12 +63,17 @@ add_library(fdtd_core STATIC
     src/core/GpuSolver.cpp
     src/core/Segy.cpp
     src/core/ModelImport.cpp
+    src/core/ImageModel.cpp
+    src/core/ModelCanvas.cpp
     src/core/ParamsIO.cpp
     src/core/Report.cpp
     src/core/Simulation.cpp)
 target_include_directories(fdtd_core PUBLIC src)
 target_include_directories(fdtd_core PRIVATE ${imgui_SOURCE_DIR})   # imstb_truetype.h (report fonts)
 target_link_libraries(fdtd_core PUBLIC glad nlohmann_json::nlohmann_json)
+if(WIN32)
+    target_link_libraries(fdtd_core PUBLIC windowscodecs ole32)   # image models (WIC)
+endif()
 
 if(MSVC)
     set(FAST_FLAGS /O2 /Oi /arch:AVX2 /fp:fast /utf-8 /W3 /permissive-)
@@ -87,6 +92,7 @@ add_executable(SeismicFDTD WIN32
     src/ui/App.cpp
     src/ui/SceneView.cpp
     src/ui/GatherView.cpp
+    src/ui/ModelEditor.cpp
     src/app.rc)
 target_include_directories(SeismicFDTD PRIVATE src ${pfd_SOURCE_DIR})
 target_link_libraries(SeismicFDTD PRIVATE fdtd_core imgui glfw opengl32)

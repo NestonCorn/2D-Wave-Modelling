@@ -1,7 +1,10 @@
 #pragma once
 #include <string>
 #include <vector>
+#include <array>
 #include "Ui.hpp"
+#include "core/ImageModel.hpp"
+#include "ModelEditor.hpp"
 
 namespace ui {
 
@@ -48,6 +51,8 @@ private:
     void notify(const std::string& msg);                       // brief confirmation (toast)
     void alert(const std::string& msg) { sim_.alerts.push_back(msg); }   // problem to read (modal)
     void pickModelFile(ModelQuantity q);
+    void pickImageModel();
+    void sectionImageModel();
     void toggleSegy();
     void saveLocal();
     void loadLocal();
@@ -85,6 +90,16 @@ private:
         bool bigEndian = false;
         std::string probeError;
     } imp_;
+
+    // Velocity model drawn as an image (gray level -> velocity)
+    struct ImageModelState {
+        bool loaded = false;
+        std::string name;
+        GrayImage img;
+        std::array<float, 256> vel{};
+        float widthM = 1200, depthM = 400;
+    } imgModel_;
+    ModelEditor editor_;   // drawing window for a model
 
     // Line simulation settings
     int lineShots_ = 10;

@@ -22,6 +22,9 @@
 #include "core/Segy.hpp"
 #include "core/Simulation.hpp"
 #include "core/Wavelet.hpp"
+#include "core/ImageModel.hpp"
+#include "core/ModelCanvas.hpp"
+#include "core/Report.hpp"
 
 static int failures = 0;
 #define CHECK(cond, ...)                                              \
@@ -932,6 +935,112 @@ std::string runLine(double firstX, int n, double interval, const std::filesystem
 }
 } // namespace linetest
 
+// Velocity model drawn as an image: gray levels, merged colours, the model in the simulation
+static void testImageModel() {
+    std::printf("[image model] gray levels of an image -> velocities -> simulation\n");
+    const auto dir = std::filesystem::temp_directory_path() / "fdtd_image_test";
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    // 60 x 30: rows 0-9 black, 10-19 red (200,50,50), 20-29 green (0,162,0) - red and green both
+    // have luma 95 - and a white 10 x 5 block at the bottom right
+    report::Image im;
+    im.w = 60; im.h = 30;
+    im.rgb.assign((size_t)im.w * im.h * 3, 0);
+    for (int y = 0; y < im.h; y++)
+        for (int x = 0; x < im.w; x++) {
+            uint8_t* p = &im.rgb[((size_t)y * im.w + x) * 3];
+            if (y >= 25 && x >= 50) { p[0] = p[1] = p[2] = 255; }
+            else if (y >= 20) { p[1] = 162; }
+            else if (y >= 10) { p[0] = 200; p[1] = 50; p[2] = 50; }
+        }
+    std::string err;
+    const auto png = dir / "model.png";
+    CHECK(report::writePng(png.string(), im, err), "test image not written: %s", err.c_str());
+    GrayImage g;
+    const bool ok = loadGrayImage(png.string(), g, err);
+    CHECK(ok, "image not read: %s", err.c_str());
+    if (!ok) return;
+    const std::vector<int> lv = g.levels();
+    std::printf("  %dx%d px, levels:", g.w, g.h);
+    for (int l : lv) std::printf(" %d (%d px)", l, g.count[l]);
+    std::printf(", %d colours\n", g.colours);
+    CHECK(g.w == 60 && g.h == 30, "size %dx%d", g.w, g.h);
+    CHECK(lv == std::vector<int>({0, 95, 255}), "gray levels not 0 / 95 / 255");
+    CHECK(g.count[0] == 600 && g.count[95] == 1150 && g.count[255] == 50, "pixel counts %d / %d / %d", g.count[0], g.count[95], g.count[255]);
+    CHECK(g.colours == 4, "%d colours (red and green share gray 95: expected 4 colours for 3 levels)", g.colours);
+
+    std::array<float, 256> vel{};
+    vel[0] = 1500; vel[95] = 2500; vel[255] = 4000;
+    GridModel m = modelFromGray(g, vel, 1180, 580, "model.png");   // 20 m per pixel
+    CHECK(m.nx == 60 && m.nz == 30 && std::fabs(m.dx - 20) < 1e-9 && std::fabs(m.dz - 20) < 1e-9, "grid %dx%d dx %g dz %g", m.nx, m.nz, m.dx, m.dz);
+    Simulation sim;
+    sim.init(false);
+    CHECK(sim.loadModel(m, GridModel{}, err), "model not loaded: %s", err.c_str());
+    sim.alerts.clear();
+    const GridModel& v = sim.modelVelocity();
+    // Inside each band (away from the bilinear edges) and in the white block
+    const double a = v.sample(300, 100), b = v.sample(300, 300), c = v.sample(300, 500), d = v.sample(1150, 560);
+    std::printf("  model: %.0f / %.0f / %.0f / %.0f m/s; domain %.0f x %.0f m, seafloor at x=300: %.0f m\n", a, b, c, d, sim.p.domain_W,
+                sim.p.domain_H, sim.seafloorBelowSurface(300));
+    CHECK(a == 1500 && b == 2500 && c == 2500 && d == 4000, "velocities %.0f %.0f %.0f %.0f", a, b, c, d);
+    CHECK(std::fabs(sim.p.domain_W - 1180) < 1 && std::fabs(sim.seafloorBelowSurface(300) - 190) <= 12,
+          "domain / seafloor not taken from the image (%.0f m, %.0f m)", sim.p.domain_W, sim.seafloorBelowSurface(300));
+    // Not an image
+    const auto txt = dir / "not_an_image.png";
+    { std::ofstream(txt) << "hello"; }
+    GrayImage bad;
+    CHECK(!loadGrayImage(txt.string(), bad, err) && !err.empty(), "a text file was read as an image");
+    std::filesystem::remove_all(dir, ec);
+}
+
+// Hand-drawn model: boundary fill, lines that stop a flood fill, undo, palette, model
+static void testModelCanvas() {
+    std::printf("[model drawing] boundary, line, fill, undo, palette -> model\n");
+    ModelCanvas cv;
+    cv.initDefault(200, 100);   // water over "Tortul 1" from row 35
+    CHECK(cv.at(10, 10) == 0 && cv.at(10, 50) == 1, "default canvas: water over sediment");
+    // Boundary from (0, 60) to (200, 80): below it layer 3
+    cv.snapshot();
+    cv.fillBelow({{150, 75}, {50, 65}}, 3);   // unsorted points, extended flat to the edges
+    CHECK(cv.at(0, 64) == 1 && cv.at(0, 66) == 3, "left edge: flat extension of the first point (y 65)");
+    CHECK(cv.at(100, 69) == 1 && cv.at(100, 71) == 3, "x = 100: boundary at y 70");
+    CHECK(cv.at(199, 74) == 1 && cv.at(199, 76) == 3, "right edge: flat extension of the last point (y 75)");
+    // A vertical line splits the water; a fill on the left stays on the left
+    cv.snapshot();
+    cv.line(100, 0, 100, 34, 1, 2);
+    const int n = cv.floodFill(10, 10, 4);
+    CHECK(cv.at(10, 10) == 4 && cv.at(150, 10) == 0, "the line did not stop the fill");
+    CHECK(n > 0 && n < 100 * 35, "filled %d pixels", n);
+    // Undo the fill and the line, redo one step
+    CHECK(cv.undo() && cv.at(10, 10) == 0 && cv.at(100, 10) == 0, "undo did not restore the canvas");
+    CHECK(cv.redo() && cv.at(100, 10) == 2 && cv.at(10, 10) == 4, "redo did not reapply");
+    // Remove palette entry 2 (the line): its pixels go to 0, entries above move down
+    const std::vector<int> before = cv.counts();
+    cv.removeEntry(2, 0);
+    const std::vector<int> after = cv.counts();
+    CHECK(cv.palette.size() == 5 && after[0] == before[0] + before[2] && after[2] == before[3] && cv.palette[2].name == "Kireçtaşı",
+          "palette removal renumbered wrongly");
+    // Model: velocities by layer, 1 m per pixel
+    GridModel m = cv.toModel(199, 99, "Çizim");
+    CHECK(m.nx == 200 && m.nz == 100 && std::fabs(m.dx - 1) < 1e-9, "model grid %dx%d dx %g", m.nx, m.nz, m.dx);
+    CHECK(m.at(150, 10) == 1500 && m.at(10, 10) == cv.palette[3].velocity && m.at(100, 90) == cv.palette[2].velocity,
+          "model velocities %g %g %g", m.at(150, 10), m.at(10, 10), m.at(100, 90));
+    // Back from a velocity grid (the salt model): one layer per velocity
+    Simulation sim;
+    sim.init(false);
+    const int j0 = (int)std::ceil(sim.OCEAN_Y / sim.SCALE - 1e-9), nz = sim.H_sim - j0;
+    std::vector<float> rows((size_t)sim.W_sim * nz);
+    for (int k = 0; k < nz; k++)
+        for (int i = 0; i < sim.W_sim; i++) rows[(size_t)k * sim.W_sim + i] = (float)(std::sqrt((double)sim.vsq[(size_t)(j0 + k) * sim.W_sim + i]) * 6000.0);
+    ModelCanvas c2;
+    c2.fromVelocity(rows.data(), sim.W_sim, nz, 300, 100);
+    std::printf("  from the salt model: %zu layers:", c2.palette.size());
+    for (auto& pe : c2.palette) std::printf(" %.0f", pe.velocity);
+    std::printf("\n");
+    CHECK(c2.palette.size() == 4 && c2.palette.front().velocity == 1500 && c2.palette.back().velocity == 4080,
+          "salt model gave %zu layers", c2.palette.size());
+}
+
 static void testLineExport() {
     using namespace linetest;
     std::printf("[line] every shot of a line into line_streamer.segy / line_obs.segy\n");
@@ -1414,6 +1523,8 @@ static void gpuSnapshots(const std::string& dir, float gain, bool minPhase, bool
 int main(int argc, char** argv) {
     const bool doBench = argc > 1 && std::string(argv[1]) == "--bench";
     if (argc > 1 && std::string(argv[1]) == "--moving") { testMovingSource(); return failures ? 1 : 0; }
+    if (argc > 1 && std::string(argv[1]) == "--canvas") { testModelCanvas(); return failures ? 1 : 0; }
+    if (argc > 1 && std::string(argv[1]) == "--image") { testImageModel(); return failures ? 1 : 0; }
     if (argc > 1 && std::string(argv[1]) == "--skipgap") { testSkipGap(); return failures ? 1 : 0; }
     bool haveGpu = false;
     GLFWwindow* win = nullptr;
@@ -1486,6 +1597,8 @@ int main(int argc, char** argv) {
     testMovingSource();
     testDensity();
     testModelImport();
+    testImageModel();
+    testModelCanvas();
     testLineExport();
     testSegy();
     testJson();

@@ -28,6 +28,8 @@ Tek ekranlık bir çalışma istasyonu düzeni:
 - Hazır modeller: düz katmanlar, fay, tuz domu
 - Dosyadan hız ve (isteğe bağlı) yoğunluk modeli: SEG-Y (her iz bir sütun; dz örnek aralığından, dx iz koordinatlarından), başlıksız float32 (sütun ya da satır sırası, little/big-endian) ya da CSV/metin ızgarası (`;` ve ondalık virgül desteklenir)
 - Birim denetimi: km/s → m/s, kg/m³ → g/cm³
+- Görselden model: PNG, JPG, BMP, GIF ya da TIFF; her piksel 0–255 gri değerine indirgenir, panelde görseldeki her gri ton listelenir ve her birine hız verilir
+- Model çizimi: katman sınırı (altını boyar), çizgi, fırça ve kova araçlarıyla model elle çizilir; her katmanın adı, rengi ve hızı vardır; geri al / ileri al, mevcut modeli çizime aktarma
 - Derinlik 0 deniz yüzeyidir; alan modelin boyutunu alır, deniz tabanı ve OBS konumları modelden bulunur
 - Yoğunluk verilmezse hızdan hesaplanır: Gardner, ρ = 0.31·V^0.25 (V m/s, ρ g/cm³); su (V ≤ 1600 m/s) için 1.03 g/cm³
 
@@ -88,6 +90,7 @@ Başsız testler şunları denetler:
 - Alıcı ara değerlemesi (izden ize varış zamanı ve genlik düzgünlüğü)
 - Yoğunluk: tek yoğunlukta sonucun değişmemesi, yoğunluk sınırında yansıma katsayısının (ρ₂ − ρ₁)/(ρ₂ + ρ₁) çıkması
 - Model dosyaları (SEG-Y IEEE/IBM, ham float32, CSV) ve modelin simülasyona yüklenmesi
+- Görselden model (gri tonlar, aynı gri tona düşen renkler, simülasyona yükleme) ve model çizimi (sınır dolgusu, çizginin dolguyu durdurması, geri alma, katman silme, mevcut modelden katmanlar)
 - Dalgacığın basamaksız bitmesi, hareketli kaynağın ızgara gürültüsü üretmemesi
 - Sonraki atışa geçişin atış konumlarını ve kayıtları değiştirmemesi (Geleneksel ve CLO)
 - Hat simülasyonu (iz başlıkları, OBS su derinliği, atışların birbirinden bağımsızlığı, SLO ve CLO kayıtları, model görseli, model SEG-Y'sinin geri okunması, PDF raporu), SEG-Y düzeni ve JSON gidiş-dönüşü

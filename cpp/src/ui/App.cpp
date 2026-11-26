@@ -107,6 +107,7 @@ void App::frame(double now) {
     toasts(ImVec2(o.x + W - S(16), bodyY + bodyH - S(14)));
 
     modelImportPopup();
+    editor_.frame(sim_, now, [this](const std::string& m) { notify(m); }, [this](const std::string& m) { alert(m); });
     alertsModal();
     ImGui::End();
     keyboard();
@@ -497,6 +498,12 @@ void App::sectionMedium(double now) {
         Hint("SEG-Y (her iz bir sütun), ham float32 ya da CSV. Derinlik 0 deniz yüzeyidir; yoğunluk verilmezse hızdan hesaplanır.");
     }
     if (ToolButton("  Hız modeli yükle…", Btn::Secondary, ImVec2(w, 0))) pickModelFile(ModelQuantity::Velocity);
+    if (ToolButton("  Görselden hız modeli…", Btn::Secondary, ImVec2(w, 0),
+                   "PNG, JPG, BMP, GIF ya da TIFF. Her piksel 0–255 arası gri değerine indirgenir; her gri tona bir hız verirsiniz."))
+        pickImageModel();
+    if (ToolButton("  Model çiz…", Btn::Secondary, ImVec2(w, 0),
+                   "Katman sınırlarını çizip boyayarak kendi hız modelinizi kurun; her renk bir hızdır."))
+        editor_.open(sim_, now_);
     if (sim_.hasModel()) {
         if (ToolButton("  Yoğunluk modeli yükle…", Btn::Secondary, ImVec2(w, 0))) pickModelFile(ModelQuantity::Density);
         if (!sim_.modelDensity().empty() && ToolButton("Yoğunluğu hızdan hesapla", Btn::Ghost, ImVec2(w, 0))) {
@@ -510,7 +517,94 @@ void App::sectionMedium(double now) {
             notify("Yüklenen model kaldırıldı; düz katman modeli kullanılıyor.");
         }
     }
+    if (imgModel_.loaded) sectionImageModel();
     ImGui::Dummy(ImVec2(0, S(4)));
+}
+
+// ── Velocity model from an image: one velocity per gray level ──────────────
+void App::pickImageModel() {
+    auto files = pfd::open_file("Hız modeli için görsel seç", "",
+                                {"Görseller", "*.png *.jpg *.jpeg *.bmp *.gif *.tif *.tiff", "Tüm dosyalar", "*"}).result();
+    if (files.empty()) return;
+    GrayImage img;
+    std::string err;
+    if (!loadGrayImage(files[0], img, err)) { alert(err); return; }
+    ImageModelState s;
+    s.loaded = true;
+    s.name = baseName(files[0]);
+    s.img = std::move(img);
+    // Default: a straight ramp, black 1500 m/s (water) to white 4500 m/s
+    for (int g = 0; g < 256; g++) s.vel[g] = std::round(1500.0f + 3000.0f * g / 255.0f);
+    // Keep the domain the model sits in now (the image spans it from the sea surface down)
+    s.widthM = std::round(sim_.p.domain_W);
+    s.depthM = std::round(sim_.p.domain_H * (1.0f - 0.166f));
+    imgModel_ = std::move(s);
+}
+
+void App::sectionImageModel() {
+    ImageModelState& s = imgModel_;
+    const std::vector<int> levels = s.img.levels();
+    caption("Görselden model");
+    char b[200];
+    std::snprintf(b, sizeof(b), "%s\n%d × %d piksel, %zu farklı gri ton", s.name.c_str(), s.img.w, s.img.h, levels.size());
+    Hint(b, col::text);
+    if (s.img.colours > (int)levels.size()) {
+        std::snprintf(b, sizeof(b), "Görselde %d renk var, %zu gri tona düştü: aynı gri değerdeki renkler aynı hızı alır.", s.img.colours,
+                      levels.size());
+        Hint(b, col::warn);
+    }
+    if (levels.size() > 24)
+        Hint("Çok sayıda ton var; kenar yumuşatma (anti-aliasing) ya da JPEG sıkıştırması ara tonlar üretmiş olabilir.", col::warn);
+    Hint("1600 m/s ve altı su sayılır: deniz tabanı ve OBS konumları buna göre bulunur.");
+
+    // One row per gray level: swatch, level and share of the image, velocity box
+    const float avail = ImGui::GetContentRegionAvail().x, boxW = S(96), rowH = ImGui::GetFrameHeight();
+    const double total = (double)s.img.w * s.img.h;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    for (int g : levels) {
+        ImGui::PushID(g);
+        const ImVec2 q = ImGui::GetCursorScreenPos();
+        const float sw = rowH * 0.8f, sy = q.y + (rowH - sw) * 0.5f;
+        dl->AddRectFilled(ImVec2(q.x, sy), ImVec2(q.x + sw, sy + sw), IM_COL32(g, g, g, 255), S(3));
+        dl->AddRect(ImVec2(q.x, sy), ImVec2(q.x + sw, sy + sw), col::rail, S(3));
+        std::snprintf(b, sizeof(b), "Gri %d", g);
+        dl->AddText(ImVec2(q.x + sw + S(10), q.y + (rowH - ImGui::GetTextLineHeight()) * 0.5f), col::text, b);
+        std::snprintf(b, sizeof(b), "%%%.1f", 100.0 * s.img.count[g] / total);
+        const float pw = fonts.mono->CalcTextSizeA(fonts.mono->FontSize, FLT_MAX, 0, b).x;
+        dl->AddText(fonts.mono, fonts.mono->FontSize, ImVec2(q.x + avail - boxW - S(12) - pw, q.y + (rowH - fonts.mono->FontSize) * 0.5f),
+                    col::muted, b);
+        ImGui::SetCursorScreenPos(ImVec2(q.x + avail - boxW, q.y));
+        ImGui::SetNextItemWidth(boxW);
+        ImGui::PushFont(fonts.mono);
+        ImGui::PushStyleColor(ImGuiCol_Text, vec(col::textHi));
+        float v = s.vel[g];
+        if (ImGui::InputFloat("##vel", &v, 0, 0, "%.0f")) s.vel[g] = v;
+        if (ImGui::IsItemDeactivatedAfterEdit()) s.vel[g] = std::clamp(std::round(s.vel[g]), 300.0f, 8000.0f);
+        ImGui::PopStyleColor();
+        ImGui::PopFont();
+        Tip("Bu gri tondaki piksellerin hızı (m/s, 300 – 8000).");
+        ImGui::SetCursorScreenPos(ImVec2(q.x, q.y + rowH));
+        ImGui::Dummy(ImVec2(avail, S(2)));
+        ImGui::PopID();
+    }
+    ImGui::Dummy(ImVec2(0, S(2)));
+    ParamRow("Model genişliği (m)", "imgW", &s.widthM, 100, 25000, 10, "%.0f");
+    Tip("Görselin sol kenarı x = 0, sağ kenarı bu uzaklık.");
+    ParamRow("Model derinliği (m)", "imgD", &s.depthM, 50, 12000, 10, "%.0f");
+    Tip("Görselin üst kenarı deniz yüzeyi, alt kenarı bu derinlik.");
+    std::snprintf(b, sizeof(b), "Piksel boyu: %.2f m (yatay) × %.2f m (düşey)", s.widthM / (s.img.w - 1), s.depthM / (s.img.h - 1));
+    Hint(b);
+    const float w = ImGui::GetContentRegionAvail().x;
+    if (ToolButton("Hız modelini oluştur", Btn::Secondary, ImVec2(w, 0), "Hız modeli bu görselden kurulur; yoğunluk hızdan (Gardner) hesaplanır.")) {
+        std::string err;
+        GridModel m = modelFromGray(s.img, s.vel, s.widthM, s.depthM, s.name);
+        if (sim_.loadModel(std::move(m), GridModel{}, err)) {
+            std::snprintf(b, sizeof(b), "Görselden hız modeli kuruldu: %s, %zu ton, %.0f × %.0f m.", s.name.c_str(), levels.size(), s.widthM,
+                          s.depthM);
+            notify(b);
+        } else alert(err);
+    }
+    if (ToolButton("Görseli kapat", Btn::Ghost, ImVec2(w, 0), "Bu listeyi kapatır; kurulan model yerinde kalır.")) imgModel_ = ImageModelState{};
 }
 
 void App::sectionGeometry() {
