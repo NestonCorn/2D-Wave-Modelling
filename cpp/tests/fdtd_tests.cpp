@@ -678,7 +678,7 @@ static void testMovingSource() {
         double rms = 0;
         for (float v : P) rms += (double)v * v;
         rms = std::sqrt(rms / P.size());
-        rel[moving] = checkerRms(P, sim.W_sim, sim.H_sim) / rms;
+        rel[moving] = checkerRms(P, sim.gridW(), sim.gridH()) / rms;
     }
     std::printf("  checkerboard / field rms at 2 s: fixed ship %.2e, moving ship %.2e\n", rel[0], rel[1]);
     CHECK(rel[1] < 3 * rel[0] + 1e-4, "moving source leaves grid-scale noise (%.2e vs %.2e)", rel[1], rel[0]);
@@ -983,6 +983,8 @@ static void testImageModel() {
     std::printf("  model: %.0f / %.0f / %.0f / %.0f m/s; domain %.0f x %.0f m, seafloor at x=300: %.0f m\n", a, b, c, d, sim.p.domain_W,
                 sim.p.domain_H, sim.seafloorBelowSurface(300));
     CHECK(a == 1500 && b == 2500 && c == 2500 && d == 4000, "velocities %.0f %.0f %.0f %.0f", a, b, c, d);
+    const auto vr = sim.modelVelocityRange();   // kept from loadModel (the panel reads it every frame)
+    CHECK(vr.first == 1500 && vr.second == 4000, "velocity range %.0f - %.0f", vr.first, vr.second);
     CHECK(std::fabs(sim.p.domain_W - 1180) < 1 && std::fabs(sim.seafloorBelowSurface(300) - 190) <= 12,
           "domain / seafloor not taken from the image (%.0f m, %.0f m)", sim.p.domain_W, sim.seafloorBelowSurface(300));
     {   // Larger than the 40 million pixels once allowed, and read in several bands: a 24-bit
@@ -1085,6 +1087,104 @@ static void testModelCanvas() {
     std::string cut = js;
     cut.replace(cut.find("\"pixels_rle\""), std::string::npos, "\"pixels_rle\": [0, 5]}");
     CHECK(!c4.fromJson(cut, w4, d4, err) && c4.px == c3.px && w4 == 1, "a truncated drawing changed the canvas (%s)", err.c_str());
+}
+
+// Boundary reflections. The same uniform model runs in its own domain and in one 1200 m
+// larger on every side (deeper by 1668 m, so that the sea surface sits at the same place in
+// its grid cell); the streamer records differ only by what the small domain's boundaries sent
+// back. The absorbing layers lie outside the model: with the free surface off the top one
+// was the air strip alone (19 cells for a 400 m model) and reflected ~10 %.
+static double boundaryReflection(float v, bool freeSurface, float freq) {
+    std::vector<float> rec[2];
+    int nrec = 0, ns = 0;
+    for (int big = 0; big < 2; big++) {
+        Simulation sim;
+        sim.p.free_surface = freeSurface;
+        sim.p.ship_speed_knots = 0;
+        sim.p.expanding_box = false;
+        sim.p.freq = freq;
+        sim.p.sismo_ms = 600;
+        sim.init(false);
+        const double W = 1200 + (big ? 2400 : 0), D = 400 + (big ? 1668 : 0);
+        GrayImage g;
+        g.w = (int)(W / 4) + 1; g.h = (int)(D / 4) + 1;
+        g.gray.assign((size_t)g.w * g.h, 0);
+        std::array<float, 256> vel{};
+        vel[0] = v;
+        std::string err;
+        if (!sim.loadModel(modelFromGray(g, vel, W, D, "uniform"), GridModel{}, err)) return 1;
+        sim.alerts.clear();
+        sim.p.obs_enabled = false;
+        sim.onShipX((float)(700 + (big ? 1200 : 0)));
+        sim.startMode(Mode::Trad);
+        double now = 0;
+        while (sim.cycle_t < sim.sismoSteps()) { now += 1.0 / 60; sim.update(now, 1.0 / 60); sim.cpuSolver().wait(); }
+        for (int i = 0; i < 3; i++) { now += 1.0 / 60; sim.update(now, 1.0 / 60); sim.cpuSolver().wait(); }
+        rec[big].assign(sim.sismo.begin(), sim.sismo.begin() + (size_t)sim.N_REC * kSismoStride);
+        nrec = sim.N_REC;
+        ns = sim.sismoSamples();
+    }
+    double mx = 0, d = 0;
+    for (int r = 0; r < nrec; r++)
+        for (int s = 0; s < ns; s++) {
+            const size_t k = (size_t)r * kSismoStride + s;
+            mx = std::max(mx, (double)std::fabs(rec[1][k]));
+            d = std::max(d, (double)std::fabs(rec[0][k] - rec[1][k]));
+        }
+    return mx > 0 ? d / mx : 1;
+}
+
+static void testBoundaryReflections() {
+    std::printf("[boundaries] reflections of the absorbing layers (40 cells outside the model), streamer record\n");
+    struct C { float v; bool fs; float f; double limit; };
+    for (const C& c : {C{1500, true, 20, 0.01}, C{3500, true, 20, 0.02}, C{4500, true, 20, 0.03}, C{1500, false, 20, 0.02},
+                       C{3500, false, 20, 0.03}, C{4500, false, 20, 0.04}}) {
+        const double r = boundaryReflection(c.v, c.fs, c.f);
+        std::printf("  %4.0f m/s, free surface %s, %2.0f Hz: %.2f %% of the record peak\n", c.v, c.fs ? "on " : "off", c.f, 100 * r);
+        CHECK(r < c.limit, "boundary reflection %.2f %% (limit %.1f %%)", 100 * r, 100 * c.limit);
+    }
+}
+
+// Changing the grid spacing after a run: the CPU engine respawns its workers when the thread
+// count changes (it follows the row count). New workers started from generation 0, saw the
+// last run's generation and ran its stale job while init() was reallocating the fields: a
+// crash (finer grid) or a silently corrupted start (coarser grid).
+static void testRegridAfterRun() {
+    std::printf("[regrid] grid spacing changed after a CPU run\n");
+    for (float dh : {2.0f, 8.0f}) {
+        Simulation a;
+        a.userForceCPU = true;
+        a.init(false);
+        double now = 0;
+        a.startMode(Mode::Trad);
+        while (a.cycle_t * a.dtPhy() < 0.2) { now += 1.0 / 60; a.update(now, 1.0 / 60); a.cpuSolver().wait(); }
+        a.stopMode();
+        a.p.dh = dh;
+        a.onGridSize(now);
+        now += 0.2;
+        a.update(now, 1.0 / 60);
+        a.startMode(Mode::Trad);
+        while (a.cycle_t * a.dtPhy() < 0.15) { now += 1.0 / 60; a.update(now, 1.0 / 60); a.cpuSolver().wait(); }
+        a.cpuSolver().wait();
+
+        Simulation b;   // the same run on a fresh simulation at that spacing
+        b.userForceCPU = true;
+        b.p.dh = dh;
+        b.init(false);
+        double nb = 0;
+        b.startMode(Mode::Trad);
+        while (b.cycle_t < a.cycle_t) { nb += 1.0 / 60; b.update(nb, 1.0 / 60); b.cpuSolver().wait(); }
+        b.cpuSolver().wait();
+        double mx = 0, d = 0;
+        const std::vector<float>&pa = a.cpuSolver().P(), &pb = b.cpuSolver().P();
+        for (size_t i = 0; i < pa.size() && i < pb.size(); i++) {
+            mx = std::max(mx, (double)std::fabs(pb[i]));
+            d = std::max(d, (double)std::fabs(pa[i] - pb[i]));
+        }
+        std::printf("  dh %g: grid %dx%d, step %.0f vs %.0f, max |P diff| %.3g of %.3g\n", dh, a.W_sim, a.H_sim, a.cycle_t, b.cycle_t, d, mx);
+        CHECK(a.W_sim == b.W_sim && a.H_sim == b.H_sim && a.cycle_t == b.cycle_t && mx > 0 && d <= 1e-5 * mx,
+              "run after the regrid differs from a fresh run (%.3g of %.3g)", d, mx);
+    }
 }
 
 static void testLineExport() {
@@ -1397,7 +1497,7 @@ static void simSnapshots(const std::string& dir, int modeIdx, bool minPhase, boo
         sim.p.free_surface = freeSurface;
         sim.p.dh = dh;
         sim.init(false);
-        W = sim.W_sim; H = sim.H_sim;
+        W = sim.gridW(); H = sim.gridH();
         sim.startMode(m);
         double now = 0;
         for (double tms : times) {
@@ -1555,7 +1655,7 @@ static void gpuSnapshots(const std::string& dir, float gain, bool minPhase, bool
         sim.cpuSolver().wait();
         now += 1.0 / 60; sim.p.speed_ms = 0.001f; sim.update(now, 1.0 / 60); sim.p.speed_ms = 16.7f;   // apply the finished batch (texture upload)
         glFinish();
-        std::vector<uint8_t> px((size_t)sim.W_sim * sim.H_sim * 4);
+        std::vector<uint8_t> px((size_t)sim.gridW() * sim.gridH() * 4);
         glBindTexture(GL_TEXTURE_2D, sim.waveTex);
         glPixelStorei(GL_PACK_ALIGNMENT, 1);
         glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
@@ -1590,6 +1690,8 @@ int main(int argc, char** argv) {
             }
         }
     }
+    if (argc > 1 && std::string(argv[1]) == "--boundaries") { testBoundaryReflections(); return failures ? 1 : 0; }
+    if (argc > 1 && std::string(argv[1]) == "--regridtest") { testRegridAfterRun(); return failures ? 1 : 0; }
     if (argc > 3 && std::string(argv[1]) == "--gpusnap") {
         bool mp = false, cpuOnly = false;
         for (int a = 4; a < argc; a++) { if (std::string(argv[a]) == "minphase") mp = true; if (std::string(argv[a]) == "cpu") cpuOnly = true; }
@@ -1638,6 +1740,8 @@ int main(int argc, char** argv) {
     testPipelineMatchesBarrier();
     testSourceWaveletController();
     testReceiverInterpolation();
+    testRegridAfterRun();
+    testBoundaryReflections();
     testPulseEnd();
     testSkipGap();
     testMovingSource();

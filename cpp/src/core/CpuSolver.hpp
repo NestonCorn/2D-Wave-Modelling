@@ -53,7 +53,7 @@ public:
 
 private:
     void shutdown();
-    void workerMain(int t);
+    void workerMain(int t, uint64_t startGen);
     template <int ORD> void runJob(int t);         // barrier per phase, rows split across threads
     template <int ORD> void runPipelined(int t);   // temporal blocking: one step per thread, wavefront
     void serialPhase(int s);

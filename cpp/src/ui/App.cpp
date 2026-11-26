@@ -467,9 +467,9 @@ void App::sectionMedium(double now) {
         ImGui::PopFont();
     };
     if (p.geology == GeologyModel::Imported && sim_.hasModel()) {
-        const GridModel& v = sim_.modelVelocity();
         char b[64];
-        std::snprintf(b, sizeof(b), "%.0f – %.0f m/s", v.minValue(), v.maxValue());
+        const auto vr = sim_.modelVelocityRange();
+        std::snprintf(b, sizeof(b), "%.0f – %.0f m/s", vr.first, vr.second);
         ReadoutRow("Aralık", b);
     } else {
         swatchRow(hex(0x112538), "Su", "1500 m/s");
@@ -490,7 +490,8 @@ void App::sectionMedium(double now) {
         Hint(b, col::text);
         const GridModel& r = sim_.modelDensity();
         if (!r.empty()) {
-            std::snprintf(b, sizeof(b), "Yoğunluk: %s (%.2f – %.2f g/cm³)", r.source.c_str(), r.minValue(), r.maxValue());
+            const auto rr = sim_.modelDensityRange();
+            std::snprintf(b, sizeof(b), "Yoğunluk: %s (%.2f – %.2f g/cm³)", r.source.c_str(), rr.first, rr.second);
             Hint(b, col::text);
         }
         if (p.geology != GeologyModel::Imported) Hint("Şu an hazır bir model seçili; yüklenen modele dönmek için listeden seçin.", col::warn);
@@ -594,6 +595,15 @@ void App::sectionImageModel() {
     Tip("Görselin üst kenarı deniz yüzeyi, alt kenarı bu derinlik.");
     std::snprintf(b, sizeof(b), "Piksel boyu: %.2f m (yatay) × %.2f m (düşey)", s.widthM / (s.img.w - 1), s.depthM / (s.img.h - 1));
     Hint(b);
+    // The model is solved on the simulation grid, not at the pixel size
+    const float pix = std::min(s.widthM / (s.img.w - 1), s.depthM / (s.img.h - 1));
+    std::snprintf(b, sizeof(b), "Simülasyon ızgarası: %g m (Sayısal çözüm → Izgara aralığı). Model bu ızgarada çözülür.", sim_.p.dh);
+    Hint(b, col::text);
+    if (pix < 0.5f * sim_.p.dh) {
+        std::snprintf(b, sizeof(b), "Pikseller ızgaradan %.0f kat küçük: %g m'den ince ayrıntılar simülasyonda görünmez. Gerekirse ızgara "
+                      "aralığını küçültün (hesap süresi artar).", sim_.p.dh / pix, sim_.p.dh);
+        Hint(b, col::warn);
+    }
     const float w = ImGui::GetContentRegionAvail().x;
     if (ToolButton("Hız modelini oluştur", Btn::Secondary, ImVec2(w, 0), "Hız modeli bu görselden kurulur; yoğunluk hızdan (Gardner) hesaplanır.")) {
         std::string err;

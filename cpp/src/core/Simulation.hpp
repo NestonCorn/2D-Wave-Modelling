@@ -77,6 +77,9 @@ public:
     bool hasModel() const { return !modelVel_.empty(); }
     const GridModel& modelVelocity() const { return modelVel_; }
     const GridModel& modelDensity() const { return modelRho_; }
+    // Velocity (m/s) and density (g/cm^3) ranges of the loaded model, kept from loadModel()
+    std::pair<float, float> modelVelocityRange() const { return velRange_; }
+    std::pair<float, float> modelDensityRange() const { return rhoRange_; }
     // Seafloor depth (m from the top of the domain) at x: OBS placement, drawing, SEG-Y
     // Seafloor at x on the canvas (y from the top of the domain, air strip included); what the
     // solver places the OBS by. SEG-Y and reports want it below the sea surface.
@@ -135,6 +138,14 @@ public:
         return std::clamp((int)std::ceil(sismoSteps() / sismoStepsPerSample()), 1, kSismoStride);
     }
     int sjSurf() const { return (int)std::floor(OCEAN_Y / SCALE); }
+    // Solver grid: the model grid (W_sim x H_sim) with the absorbing layers outside it, padX()
+    // cells left and right, padTop() above and as many below. Fields, pixels, the wave texture,
+    // the eikonal box and CPU / GPU engines live on it; vsq / rho stay on the model grid.
+    int gridW() const { return gW_; }
+    int gridH() const { return gH_; }
+    int padX() const { return padX_; }
+    int padTop() const { return padT_; }
+    int sjSurfGrid() const { return sjSurf() + padT_; }
 
     // Alerts raised by actions: problems the user must read (UI shows them in a modal, then clears)
     std::vector<std::string> alerts;
@@ -215,6 +226,10 @@ private:
     Material mat_;
     double vmaxNorm_ = 0.68, vminMs_ = 1500.0;   // model extremes (CPML damping, CFL / dispersion status)
     std::vector<float> obsX_, obsY_;
+    std::vector<float> obsXg_, obsYg_;         // OBS on the solver grid (metres from its corner)
+    std::vector<float> vsqG_, rhoG_;           // model carried out into the absorbing pads
+    int gW_ = 0, gH_ = 0, padX_ = 0, padT_ = 0, padB_ = 0;
+    std::pair<float, float> velRange_{0, 0}, rhoRange_{0, 0};
     double accumulated_ = 0;
     double simTime_ = 0;             // simulated seconds since the cycle start (expanding-box clock; survives dt changes)
 

@@ -88,7 +88,11 @@ void Simulation::regridNow() {
     for (;;) {
         W_sim = (int)std::floor(p.domain_W / SCALE) + 1;
         H_sim = (int)std::floor(p.domain_H / SCALE) + 1;
-        if ((double)W_sim * H_sim * 80.0 <= 0.5 * physicalRamBytes() || SCALE >= 8.0) break;
+        // The absorbing layers lie outside the model: npml cells on every side of the solver grid
+        padX_ = padT_ = padB_ = std::max(0, p.npml);
+        gW_ = W_sim + 2 * padX_;
+        gH_ = padT_ + H_sim + padB_;
+        if ((double)gW_ * gH_ * 80.0 <= 0.5 * physicalRamBytes() || SCALE >= 8.0) break;
         SCALE = std::min(8.0, SCALE * 2.0);
         coarsened = true;
     }
@@ -124,8 +128,8 @@ void Simulation::rebuildEngines() {
     // fastest with 6-8 threads on every grid size (no per-step barriers any more); beyond
     // half the logical cores + 1, SMT / efficiency cores only add contention. Each thread
     // needs a few dozen rows of its own to stay out of its neighbours' way.
-    const int nThreads = std::clamp(hc / 2 + 1, 1, std::max(1, H_sim / 16));
-    cpu_.init(W_sim, H_sim, nThreads, sismoSize);
+    const int nThreads = std::clamp(hc / 2 + 1, 1, std::max(1, gH_ / 16));
+    cpu_.init(gW_, gH_, nThreads, sismoSize);
     cpu_.setMaterial(mat_);
     cpu_.setCpml(bx_, ax_, bz_, az_);
     threadStats.assign(cpu_.threadCount(), {});
@@ -150,7 +154,7 @@ void Simulation::initGPU() {
         badge = {BadgeKind::Cpu, "", gpuReason_};
         return;
     }
-    const long long bufBytes = (long long)W_sim * H_sim * 4;
+    const long long bufBytes = (long long)gW_ * gH_ * 4;
     if (bufBytes > maxSsbo_ || bufBytes * 9.0 > 0.35 * physicalRamBytes()) {
         gpuReady = false;
         char lbl[128];
@@ -161,19 +165,19 @@ void Simulation::initGPU() {
         return;
     }
     std::string err;
-    if (gpu_.matches(W_sim, H_sim, N_REC, N_OBS)) {
+    if (gpu_.matches(gW_, gH_, N_REC, N_OBS)) {
         gpu_.setMaterial(mat_);
         gpu_.setCpml(bx_, ax_, bz_, az_);
-        gpu_.setObs(obsX_, obsY_);
+        gpu_.setObs(obsXg_, obsYg_);
         if (gpu_.ensurePrograms(p.fd_order, err)) {
             badge = {BadgeKind::Gpu, gpuRenderer_, "Hazır: Önceki OpenGL yapılandırması yeniden kullanılıyor."};
             gpuReady = true;
             return;
         }
-    } else if (gpu_.init(W_sim, H_sim, N_REC, N_OBS, err)) {
+    } else if (gpu_.init(gW_, gH_, N_REC, N_OBS, err)) {
         gpu_.setMaterial(mat_);
         gpu_.setCpml(bx_, ax_, bz_, az_);
-        gpu_.setObs(obsX_, obsY_);
+        gpu_.setObs(obsXg_, obsYg_);
         if (gpu_.ensurePrograms(p.fd_order, err)) {
             badge = {BadgeKind::Gpu, gpuRenderer_, "OpenGL compute motoru başarıyla başlatıldı ve çalışıyor."};
             gpuReady = true;
@@ -186,8 +190,8 @@ void Simulation::initGPU() {
 }
 
 void Simulation::updateCpml() {
-    cpmlX(W_sim, p.npml, p.dt, bx_, ax_, vmaxNorm_);
-    cpmlZ(H_sim, p.npml, p.dt, OCEAN_Y, SCALE, p.free_surface, bz_, az_, vmaxNorm_);
+    cpmlX(gW_, padX_, p.dt, bx_, ax_, vmaxNorm_);
+    cpmlZ(gH_, padB_, p.dt, OCEAN_Y + padT_ * SCALE, SCALE, p.free_surface, bz_, az_, vmaxNorm_);
 }
 
 void Simulation::computeObsPositions() {
@@ -197,6 +201,12 @@ void Simulation::computeObsPositions() {
         double rx = (i + 1) * (double)p.obs_spacing;
         obsX_[i] = (float)rx;
         obsY_[i] = (float)(seafloorDepth(rx) + 4.0);   // slight offset below seabed
+    }
+    obsXg_.resize(N_OBS);
+    obsYg_.resize(N_OBS);
+    for (int i = 0; i < N_OBS; i++) {
+        obsXg_[i] = obsX_[i] + (float)(padX_ * SCALE);
+        obsYg_[i] = obsY_[i] + (float)(padT_ * SCALE);
     }
 }
 
@@ -241,7 +251,18 @@ void Simulation::fillModel() {
     for (float x : vsq) { mx = std::max(mx, x); mn = std::min(mn, x); }
     vmaxNorm_ = std::max(0.68, std::sqrt((double)mx));
     vminMs_ = std::min(1500.0, std::sqrt((double)mn) * kVelocityNorm);
-    mat_ = makeMaterial(vsq, rho, W_sim, H_sim);
+    // Solver grid: the model's edge values carried out into the absorbing pads
+    vsqG_.resize((size_t)gW_ * gH_);
+    rhoG_.resize((size_t)gW_ * gH_);
+    for (int j = 0; j < gH_; j++) {
+        const int mj = std::clamp(j - padT_, 0, H_sim - 1);
+        for (int i = 0; i < gW_; i++) {
+            const size_t m = (size_t)mj * W_sim + std::clamp(i - padX_, 0, W_sim - 1), g = (size_t)j * gW_ + i;
+            vsqG_[g] = vsq[m];
+            rhoG_[g] = rho[m];
+        }
+    }
+    mat_ = makeMaterial(vsqG_, rhoG_, gW_, gH_);
     if (glAvailable_) createModelTexture();
 }
 
@@ -327,19 +348,23 @@ bool Simulation::loadModel(GridModel vel, GridModel rhoModel, std::string& err) 
     stopMode();
     modelVel_ = std::move(vel);
     modelRho_ = std::move(rhoModel);
+    // Ranges once here: the panel shows them every frame, and a scan of a large image model per
+    // frame (6 Mpx: ~2 ms) dropped the frame rate, and with it the simulation speed
+    velRange_ = {modelVel_.minValue(), modelVel_.maxValue()};
+    rhoRange_ = modelRho_.empty() ? std::pair<float, float>{0, 0} : std::pair<float, float>{modelRho_.minValue(), modelRho_.maxValue()};
     p.geology = GeologyModel::Imported;
     p.domain_W = (float)W;
     p.domain_H = (float)H;
     OCEAN_Y = p.domain_H * 0.166;
     // Stability with the model's fastest velocity
-    const double vmaxN = std::max(0.68, modelVel_.maxValue() / kVelocityNorm);
+    const double vmaxN = std::max(0.68, velRange_.second / kVelocityNorm);
     const double dtMax = 1.0 / (vmaxN * std::sqrt(2.0) * cSum(p.fd_order));
     if (p.dt > 0.95 * dtMax) {
         const float old = p.dt;
         p.dt = (float)(std::floor(0.9 * dtMax * 100.0) / 100.0);
         char b[256];
         std::snprintf(b, sizeof(b), "Modelin en yüksek hızı %.0f m/s. Kararlılık için zaman katsayısı %.2f'den %.2f'ye "
-                      "düşürüldü (sınır %.2f).", modelVel_.maxValue(), old, p.dt, dtMax);
+                      "düşürüldü (sınır %.2f).", velRange_.second, old, p.dt, dtMax);
         alerts.push_back(b);
     }
     regridPending_ = false;
@@ -353,6 +378,7 @@ void Simulation::clearModel() {
     stopMode();
     modelVel_ = GridModel{};
     modelRho_ = GridModel{};
+    velRange_ = rhoRange_ = {0, 0};
     const SimParams def;
     p.geology = GeologyModel::Flat;
     p.domain_W = def.domain_W;
@@ -368,7 +394,7 @@ void Simulation::createWaveTexture() {
     if (waveTex) glDeleteTextures(1, &waveTex);
     glGenTextures(1, &waveTex);
     glBindTexture(GL_TEXTURE_2D, waveTex);
-    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, W_sim, H_sim);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, gW_, gH_);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -378,10 +404,10 @@ void Simulation::createWaveTexture() {
 
 void Simulation::clearWaveTexture() {
     if (!glAvailable_ || !waveTex) return;
-    zeroTex_.assign((size_t)W_sim * H_sim, 0u);
+    zeroTex_.assign((size_t)gW_ * gH_, 0u);
     glBindTexture(GL_TEXTURE_2D, waveTex);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, W_sim, H_sim, GL_RGBA, GL_UNSIGNED_BYTE, zeroTex_.data());
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, gW_, gH_, GL_RGBA, GL_UNSIGNED_BYTE, zeroTex_.data());
     zeroTex_.clear();
     zeroTex_.shrink_to_fit();
 }
@@ -466,7 +492,7 @@ void Simulation::toggleComputeEngine() {
 void Simulation::toggleFreeSurface() {
     p.free_surface = !p.free_surface;
     waitInFlight(true);
-    cpmlZ(H_sim, p.npml, p.dt, OCEAN_Y, SCALE, p.free_surface, bz_, az_, vmaxNorm_);
+    cpmlZ(gH_, padB_, p.dt, OCEAN_Y + padT_ * SCALE, SCALE, p.free_surface, bz_, az_, vmaxNorm_);
     cpu_.setCpmlZ(bz_, az_);
     // The HTML rewrote the GPU params here without the free-surface/geology arguments,
     // silently disabling the free surface on GPU. Both engines read the flag per batch now.
@@ -505,11 +531,10 @@ void Simulation::onTimeStep() {
 }
 
 void Simulation::onNpml() {
+    // The absorbing layers are pads around the model: their thickness sets the solver grid
     waitInFlight(false);
-    updateCpml();
-    cpu_.setCpml(bx_, ax_, bz_, az_);
-    if (gpuReady) gpu_.setCpml(bx_, ax_, bz_, az_);
     stopMode();
+    regridNow();
 }
 
 void Simulation::onCableLen() { onReceiverSpacing(false); }
@@ -540,7 +565,7 @@ void Simulation::onGeology() {
     fillModel();
     computeObsPositions();
     pushMaterial();
-    if (gpuReady) gpu_.setObs(obsX_, obsY_);
+    if (gpuReady) gpu_.setObs(obsXg_, obsYg_);
     // Reset the wavefield to avoid instant blow-ups on layout changes over existing energy
     clearAllFields();
     if (!shots.empty()) eikDirty_ = true;
@@ -717,7 +742,8 @@ void Simulation::submitBatch(int steps) {
     double sx = sxShip, sxs = sxSrc;
     const double f = p.freq;
     if (!pulse_.matches(p.wavelet, f)) pulse_.build(p.wavelet, f);
-    const int sj_src = (int)std::floor((OCEAN_Y + p.source_depth) / SCALE);
+    const int sj_src = (int)std::floor((OCEAN_Y + p.source_depth) / SCALE) + padT_;
+    const double padXM = padX_ * SCALE, padTM = padT_ * SCALE;
     for (int s = 0; s < steps; s++) {
         StepData& d = stepData_[s];
         const double cyc = cycle_t + s + 1;
@@ -726,7 +752,7 @@ void Simulation::submitBatch(int steps) {
         for (const Shot& sh : shots) {
             const double elapsed = (cyc - sh.t0) * dt_phy;
             const double val = pulse_(elapsed) * p.amp * p.dt * 0.4;
-            const float si = (float)std::floor(sh.x / SCALE);   // fixed for the whole shot
+            const float si = (float)(std::floor(sh.x / SCALE) + padX_);   // fixed for the whole shot
             if (sh.main) { d.si0 = si; d.sj0 = (float)sj_src; d.val0 = (float)val; d.act0 = val != 0 ? 1.f : 0.f; }
             else         { d.si1 = si; d.sj1 = (float)sj_src; d.val1 = (float)val; d.act1 = val != 0 ? 1.f : 0.f; }
         }
@@ -742,9 +768,9 @@ void Simulation::submitBatch(int steps) {
         }
         d.sismo_off = shot2 ? (float)((size_t)N_REC * kSismoStride) : 0.f;
         d.sxShip = (float)sx;
-        d.ry_head = (float)(OCEAN_Y + p.cable_head_depth);
-        d.ry_tail = (float)(OCEAN_Y + p.cable_tail_depth);
-        d.cable_head_x = (float)(sx - p.ship_src_dist - p.src_rec_dist);
+        d.ry_head = (float)(OCEAN_Y + p.cable_head_depth + padTM);   // receivers in solver-grid metres
+        d.ry_tail = (float)(OCEAN_Y + p.cable_tail_depth + padTM);
+        d.cable_head_x = (float)(sx - p.ship_src_dist - p.src_rec_dist + padXM);
     }
 
     BatchJob& J = inflight_.job;
@@ -753,15 +779,15 @@ void Simulation::submitBatch(int steps) {
     J.dt = p.dt;
     J.fd_order = p.fd_order;
     J.freeSurface = p.free_surface;
-    J.sj_surf = sjSurf();
+    J.sj_surf = sjSurfGrid();
     J.bxmin = batchBox_.min_i; J.bxmax = batchBox_.max_i;
     J.bymin = batchBox_.min_j; J.bymax = batchBox_.max_j;
     J.stepData = stepData_.data();
-    J.probeRow = std::clamp(sj_src, 0, H_sim - 1);
+    J.probeRow = std::clamp(sj_src, 0, gH_ - 1);
     J.N_REC = N_REC; J.N_OBS = N_OBS;
     J.cable_len = p.cable_len;
     J.SCALE = (float)SCALE;
-    J.obsX = obsX_.data(); J.obsY = obsY_.data();
+    J.obsX = obsXg_.data(); J.obsY = obsYg_.data();
     J.renderPixels = !p.sismo_only;
     J.gainNorm = p.gain / 15.0f;
 
@@ -769,19 +795,19 @@ void Simulation::submitBatch(int steps) {
     const bool active = p.expanding_box && !shots.empty();
     // With the free surface off the sea surface is transparent and the field above it is drawn
     // (the CPU path already did this when the expanding box was on; the GPU never did).
-    int drawMin = p.free_surface ? sjSurf() : 0, drawMax = H_sim - 1;
+    int drawMin = p.free_surface ? sjSurfGrid() : 0, drawMax = gH_ - 1;
     if (active) {
         drawMin = p.free_surface ? std::max(drawMin, batchBox_.min_j) : std::max(0, batchBox_.min_j);
-        drawMax = std::min(H_sim - 1, batchBox_.max_j);
+        drawMax = std::min(gH_ - 1, batchBox_.max_j);
     }
     J.drawMinJ = drawMin; J.drawMaxJ = drawMax;
     if (rowsValid) { J.rowMin = batchBox_.xMinZ.data(); J.rowMax = batchBox_.xMaxZ.data(); }
     if (active) {
-        J.dirtyX0 = std::max(0, batchBox_.min_i); J.dirtyX1 = std::min(W_sim - 1, batchBox_.max_i);
+        J.dirtyX0 = std::max(0, batchBox_.min_i); J.dirtyX1 = std::min(gW_ - 1, batchBox_.max_i);
         J.clearMinJ = drawMin; J.clearMaxJ = drawMax;
     } else {
-        J.dirtyX0 = 0; J.dirtyX1 = W_sim - 1;
-        J.clearMinJ = 0; J.clearMaxJ = H_sim - 1;
+        J.dirtyX0 = 0; J.dirtyX1 = gW_ - 1;
+        J.clearMinJ = 0; J.clearMaxJ = gH_ - 1;
     }
 
     bool useGpu = gpuReady;
@@ -827,9 +853,9 @@ void Simulation::completeBatch() {
             const int x0 = J.dirtyX0, x1 = J.dirtyX1;
             if (y1 >= y0 && x1 >= x0) {
                 glBindTexture(GL_TEXTURE_2D, waveTex);
-                glPixelStorei(GL_UNPACK_ROW_LENGTH, W_sim);
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, gW_);
                 glTexSubImage2D(GL_TEXTURE_2D, 0, x0, y0, x1 - x0 + 1, y1 - y0 + 1, GL_RGBA, GL_UNSIGNED_BYTE,
-                                cpu_.pixels().data() + (size_t)y0 * W_sim + x0);
+                                cpu_.pixels().data() + (size_t)y0 * gW_ + x0);
                 glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
             }
         }
@@ -871,20 +897,20 @@ void Simulation::startEikonal() {
     waitEikonal();
     if (shots.empty()) { eik_.clear(); return; }
     std::vector<std::pair<int, int>> cells;
-    const int sj = (int)std::floor((OCEAN_Y + p.source_depth) / SCALE);
+    const int sj = (int)std::floor((OCEAN_Y + p.source_depth) / SCALE) + padT_;   // solver grid
     for (const Shot& sh : shots) {
-        cells.push_back({(int)std::floor(sh.x / SCALE), sj});
+        cells.push_back({(int)std::floor(sh.x / SCALE) + padX_, sj});
     }
     const double scale = SCALE, dt = p.dt;
-    const int W = W_sim, H = H_sim;
+    const int W = gW_, H = gH_;
     if ((long long)W * H < 400000) {   // small grids: solve inline (sub-millisecond)
-        eik_.compute(vsq, W, H, scale, dt, cells, &eikProgress_);
+        eik_.compute(vsqG_, W, H, scale, dt, cells, &eikProgress_);
         return;
     }
     eikProgress_ = 0;
     eikBusy_ = true;
     eikFuture_ = std::async(std::launch::async, [this, cells, scale, dt, W, H] {
-        eik_.compute(vsq, W, H, scale, dt, cells, &eikProgress_);
+        eik_.compute(vsqG_, W, H, scale, dt, cells, &eikProgress_);
     });
 }
 
@@ -902,14 +928,14 @@ void Simulation::waitEikonal() {
 
 bool Simulation::boxFor(double t_sec, EikBox& out) const {
     if (!p.expanding_box || shots.empty() || eikBusy_ || !eik_.valid()) {
-        out.min_i = 0; out.max_i = W_sim - 1; out.min_j = 0; out.max_j = H_sim - 1;
+        out.min_i = 0; out.max_i = gW_ - 1; out.min_j = 0; out.max_j = gH_ - 1;
         out.hasRows = false;
         return false;
     }
     // Half a period of head start: the minimum-phase pulse carries energy from the shot
     // instant (the Ricker only from ~0.6/f), and the box edge clipped its weak numerical
     // precursor (box on/off traces differed by 2e-5; now within float noise).
-    eik_.getBox(t_sec + 0.5 / std::max(0.1f, p.freq), p.fd_order, p.free_surface, sjSurf(), out);
+    eik_.getBox(t_sec + 0.5 / std::max(0.1f, p.freq), p.fd_order, p.free_surface, sjSurfGrid(), out);
     return true;
 }
 

@@ -19,7 +19,7 @@ Tek ekranlık bir çalışma istasyonu düzeni:
 
 **Fizik ve sayısal yöntem**
 - Basınç–parçacık hızı (P, Vx, Vz) kademeli ızgara akustik FDTD, değişken yoğunluk (K = ρv², hız düğümlerinde 1/ρ), 2. – 10. derece uzaysal türevler
-- CPML soğurucu sınırlar (Komatitsch & Martin, 2007); sönümleme modelin en yüksek hızına göre ayarlanır
+- CPML soğurucu sınırlar (Komatitsch & Martin, 2007) modelin dışında: çözücü ızgarası modelin her yanına soğurucu kalınlığında hücre ekler, model kenarları bu hücrelere uzatılır; modelin hiçbir kısmı soğurucu bölgede kalmaz. Sönümleme modelin en yüksek hızına göre ayarlanır
 - Deniz yüzeyi yansıması (Dirichlet serbest yüzey) açılıp kapatılabilir; kapalıyken üstte de CPML
 - Eikonal tabanlı genişleyen hesap kutusu: yalnızca dalganın ulaştığı bölge hesaplanır
 - CFL kararlılık ve dalga boyu başına nokta göstergeleri; yüklenen model kararlılık sınırını aşarsa zaman adımı kendiliğinden düşürülür
@@ -86,6 +86,7 @@ Başsız testler şunları denetler:
 
 - CPU–GPU eşliği (alan ve sismogram) ve art arda kurulan GPU çözücülerinin temiz başlaması
 - Kararsızlık algılama, eikonal kutusu, zaman bloklamalı CPU şemasının bariyerli şemayla birebir aynılığı
+- Sınır yansımaları (aynı model kendi alanında ve 1200 m daha büyük bir alanda; deniz yüzeyi açık ve kapalı) ve bir koşudan sonra ızgara aralığı değişince yeni koşunun sıfırdan kurulanla aynı olması
 - Dalgacık şekilleri, yayılan darbe; eikonal kutusu ve serbest yüzey açık/kapalıyken kaynak dalgacığı
 - Alıcı ara değerlemesi (izden ize varış zamanı ve genlik düzgünlüğü)
 - Yoğunluk: tek yoğunlukta sonucun değişmemesi, yoğunluk sınırında yansıma katsayısının (ρ₂ − ρ₁)/(ρ₂ + ρ₁) çıkması

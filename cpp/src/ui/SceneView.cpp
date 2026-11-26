@@ -193,24 +193,34 @@ void drawScene(Simulation& sim, ImDrawList* dl, ImVec2 o, float k, float ky, int
     }
 
     // Wavefield texture (GPU writes it directly; CPU path uploads the dirty box)
-    if (!p.sismo_only && sim.waveTex)
-        dl->AddImage((ImTextureID)(intptr_t)sim.waveTex, c.P(0, 0), c.P(W, H));
+    // The texture covers the solver grid; only the model part of it is shown (the absorbing
+    // layers around the model stay off screen)
+    if (!p.sismo_only && sim.waveTex) {
+        const float gw = (float)sim.gridW(), gh = (float)sim.gridH();
+        const ImVec2 uv0(sim.padX() / gw, sim.padTop() / gh), uv1((sim.padX() + sim.W_sim) / gw, (sim.padTop() + sim.H_sim) / gh);
+        dl->AddImage((ImTextureID)(intptr_t)sim.waveTex, c.P(0, 0), c.P(W, H), uv0, uv1);
+    }
 
     // Expanding box outline
     EikBox box;
     if (p.expanding_box && !sim.shots.empty() && sim.drawBox(box) && box.hasRows) {
-        const int sj_surf = sim.sjSurf();
-        const int minJ = p.free_surface ? std::max(sj_surf, box.min_j) : box.min_j;
-        const int maxJ = box.max_j;
+        // The box is on the solver grid: rows and columns shifted by the absorbing pads,
+        // clipped to the model
+        const int pt = sim.padTop(), px = sim.padX();
+        const int sj_surf = sim.sjSurfGrid();
+        const int minJ = std::max(pt, p.free_surface ? std::max(sj_surf, box.min_j) : box.min_j);
+        const int maxJ = std::min(pt + sim.H_sim - 1, box.max_j);
         if (maxJ > minJ) {
             const float sx = W / sim.W_sim, sy = H / sim.H_sim;
+            auto X = [&](int i) { return std::clamp(i - px, 0, sim.W_sim) * sx; };
+            auto Y = [&](int j) { return (j - pt) * sy; };
             std::vector<ImVec2> v;
             v.reserve((size_t)(maxJ - minJ + 1) * 2 + 3);
-            v.push_back(c.P(box.xMinZ[minJ] * sx, minJ * sy));
-            for (int j = minJ + 1; j <= maxJ; j++) v.push_back(c.P(box.xMinZ[j] * sx, j * sy));
-            v.push_back(c.P(box.xMaxZ[maxJ] * sx, maxJ * sy));
-            for (int j = maxJ - 1; j >= minJ; j--) v.push_back(c.P(box.xMaxZ[j] * sx, j * sy));
-            v.push_back(c.P(box.xMinZ[minJ] * sx, minJ * sy));
+            v.push_back(c.P(X(box.xMinZ[minJ]), Y(minJ)));
+            for (int j = minJ + 1; j <= maxJ; j++) v.push_back(c.P(X(box.xMinZ[j]), Y(j)));
+            v.push_back(c.P(X(box.xMaxZ[maxJ]), Y(maxJ)));
+            for (int j = maxJ - 1; j >= minJ; j--) v.push_back(c.P(X(box.xMaxZ[j]), Y(j)));
+            v.push_back(c.P(X(box.xMinZ[minJ]), Y(minJ)));
             DashedPolyline(dl, v.data(), (int)v.size(), rgba(255, 255, 0, 0.5f), 2 * rX * k, 5 * k, 5 * k);
         }
     }

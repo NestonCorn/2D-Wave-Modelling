@@ -256,7 +256,11 @@ void CpuSolver::init(int W, int H, int nThreads, size_t sismoSize) {
         barrier_ = std::make_unique<std::barrier<>>(nThreads_);
         stats_.assign(nThreads_, {});
         prog_ = std::make_unique<std::atomic<int64_t>[]>(nThreads_);
-        for (int t = 0; t < nThreads_; t++) threads_.emplace_back(&CpuSolver::workerMain, this, t);
+        // New workers start at the current job generation: from 0 they took the last run's
+        // generation for a new job and ran its stale BatchJob while the fields below were
+        // being reallocated (crash after changing the grid spacing following a run)
+        const uint64_t g = gen_;
+        for (int t = 0; t < nThreads_; t++) threads_.emplace_back(&CpuSolver::workerMain, this, t, g);
     }
     W_ = W; H_ = H;
     const size_t N = (size_t)W * H;
@@ -329,11 +333,11 @@ void CpuSolver::submit(const BatchJob& job) {
     cv_.notify_all();
 }
 
-void CpuSolver::workerMain(int t) {
+void CpuSolver::workerMain(int t, uint64_t startGen) {
     // Flush denormals to zero: decaying wave tails otherwise fall into the denormal
     // range and make every arithmetic op ~100x slower (GPUs flush them already).
     _mm_setcsr(_mm_getcsr() | 0x8040);   // FTZ | DAZ
-    uint64_t seen = 0;
+    uint64_t seen = startGen;
     for (;;) {
         {
             std::unique_lock<std::mutex> lk(m_);
