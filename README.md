@@ -37,6 +37,10 @@ Tek ekranlık bir çalışma istasyonu düzeni:
 - Sınırları basamaksız yap (varsayılan açık): görselden, çizimden ya da az sayıda (en çok 256) farklı hızdan oluşan dosyadan yüklenen modelde her katman sınırı sütun sütun (45°'den dik olanlar satır satır) izlenir; küçük bir çizimden büyütülmüş görsellerdeki birkaç piksel yüksekliğindeki basamaklar da (8 piksele kadar) tanınır. Basamaklar, sınırın o noktadaki basamak boyuna göre yumuşatılır (bükümlerde sınır içe çekilmesin diye daraltılarak) ve sınırın geçtiği pikseller iki tarafın alan ağırlıklı bulk modülünü ve yoğunluğunu alır. Az eğimli bir sınır piksellerde düzenli basamaklara dönüşür ve bunlar kayıtta birbirini kesen yapay eğimli olaylar üretir; 1 m pikselli bir görsel modelde (deniz tabanı altında) bu olaylar bütün gerçek yansımalar kadar güçlüydü. Düz bir sınır yumuşatmadan sonra gerçek doğrudan en çok 0,05 piksel sapar (basamaklı halde 0,5). Kaydedilen model değişmez; yumuşatılmış kopya yalnızca çözücüye gider ([açıklamalı görsel](docs/basamaksiz_sinirlar.png))
 - Yoğunluk verilmezse hızdan hesaplanır: Gardner, ρ = 0.31·V^0.25 (V m/s, ρ g/cm³); su (V ≤ 1600 m/s) için 1.03 g/cm³
 
+**Basamaksız sınırlar, Gökova V3 modelinde:** görselin pikselleri (1 m), uygulamanın çözdüğü basamaksız model, 4 m ızgaranın eski ve yeni hali. Bu modelde piksel basamakları deniz tabanı altında gerçek yansımalar kadar güçlü yapay eğimli olaylar üretiyordu (SOFI2D'nin 1 m kaydında da). Basamaksız sınırlarla bu yapay saçılma 1 m ızgarada %114'ten %21'e, 2 m'de %24'e iner.
+
+![Basamaksız sınırlar](docs/basamaksiz_sinirlar.png)
+
 **Kaynak dalgacıkları**
 - Ricker (sıfır faz), minimum faz, Gauss, Gauss'un 1. türevi
 - Kaynak, 2B'de yayılan darbenin seçilen dalgacıkla aynı şekilde olacağı biçimde (yarı-integral düzeltmesiyle) enjekte edilir; dalgacık basamaksız biter
