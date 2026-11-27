@@ -1492,7 +1492,8 @@ static void scatterDemo(const std::string& outDir, double flatAt) {
 // The image is cropped to X0..X1 m. OPTIONS, comma separated: "flip" mirrors it, so the
 // streamer that trails the source lies on its right in the image's own coordinates; "nofs"
 // turns the free surface off; "steps" keeps the image's pixel steps (no boundary smoothing;
-// the old_ runs never smooth) ("-" for none). Run names: old_dh4, new_dh4,
+// the old_ runs never smooth); "floorsrc" puts the source on the node at or before it, with
+// the streamer where it belongs, as v2.11 and older did ("-" for none). Run names: old_dh4, new_dh4,
 // old_dh2, new_dh2, ref_dh1, all by default); the source (20 m deep, minimum phase, 50 Hz) and the
 // sea surface are put on nodes of every grid so the runs differ only in the grid. Free
 // surface on; streamer 48 x 12.5 m, 20 m deep. Snapshots at 0.5, 0.8 and 1.1 s.
@@ -1524,6 +1525,7 @@ static void imageRun(int argc, char** argv) {
     const bool flip = opts.find(",flip,") != std::string::npos;
     const bool freeSurface = opts.find(",nofs,") == std::string::npos;   // "nofs": absorbing top instead
     const bool smoothB = opts.find(",steps,") == std::string::npos;      // "steps": the image's pixel steps as they are
+    const bool floorSrc = opts.find(",floorsrc,") != std::string::npos;  // "floorsrc": the source on the node before it (v2.11 and older)
     const std::string only = argc > 12 ? argv[12] : "";
     g.w = c1 - c0 + 1; g.h = full.h;
     g.gray.resize((size_t)g.w * g.h);
@@ -1569,7 +1571,15 @@ static void imageRun(int argc, char** argv) {
         sim.OCEAN_Y = std::round(sim.OCEAN_Y / 4) * 4;   // the sea surface on a node of all three grids
         sim.p.obs_enabled = false;
         sim.onGeology();
-        sim.onShipX((flip ? x0 + W - shotX : shotX - x0) + sim.p.ship_src_dist);   // source at shotX (a node of every grid)
+        {
+            const double xs = flip ? x0 + W - shotX : shotX - x0;   // source x in the run's coordinates
+            double shift = 0;
+            if (floorSrc) {   // as v2.11 did: the source on the node at or before it, the streamer where it was
+                shift = std::floor(xs / sim.SCALE + 1e-9) * sim.SCALE - xs;
+                sim.p.src_rec_dist += (float)shift;
+            }
+            sim.onShipX(xs + shift + sim.p.ship_src_dist);
+        }
         std::printf("  %s: boundary smoothing %s: %d boundaries, %zu pixels\n", r.name, sim.p.smooth_boundaries ? "on" : "off",
                     sim.smoothStats().boundaries, sim.smoothStats().pixels);
         sim.startMode(Mode::Trad);
