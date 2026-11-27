@@ -113,14 +113,51 @@ void main() {
 }
 )GLSL";
 
-// Phase 3b: point-source injection (see CpuSolver::serialPhase). A single invocation
-// handles both shots so coinciding sources never race.
+// Phase 3b: point-source injection (see CpuSolver::serialRows). A single invocation
+// handles both shots so coinciding sources never race. The source between the nodes, spread
+// over 12 x 12 of them with the receivers' windowed sinc (axisWeights / sourceWeights in
+// SolverTypes.hpp); weights above a free surface go, negated, to their mirror rows.
 inline const char* kSource = R"GLSL(
 layout(local_size_x = 1) in;
+const int NT = 2 * RECV_HALF;
+int axisW(float f, out float c[NT]) {
+    float x0 = floor(f);
+    int i0 = int(x0);
+    float t = f - x0;
+    if (t < 1e-4 || t > 1.0 - 1e-4) {
+        for (int k = 0; k < NT; k++) c[k] = 0.0;
+        if (t > 0.5) i0++;
+        c[RECV_HALF - 1] = 1.0;
+        return i0;
+    }
+    float sum = 0.0;
+    for (int k = 0; k < NT; k++) {
+        float x = (t - float(k - RECV_HALF + 1) + float(RECV_HALF)) * float(RECV_RES);
+        int q = min(int(x), NT * RECV_RES - 1);
+        c[k] = recvK[q] + (x - float(q)) * (recvK[q + 1] - recvK[q]);
+        sum += c[k];
+    }
+    for (int k = 0; k < NT; k++) c[k] /= sum;
+    return i0;
+}
 void inject(float sif, float sjf, float val) {
-    int si = int(sif), sj = int(sjf);
-    if (si > 1 && si < W - 1 && sj > 1 && sj < H - 1 && (freeSurf == 0 || sj > sjSurf))
-        P[sj * W + si] += val * 6.21336;   // kSourceGain
+    float cx[NT], cz[NT];
+    int i0 = axisW(sif, cx), j0 = axisW(sjf, cz);
+    for (int b = 0; b < NT; b++) {
+        if (cz[b] == 0.0) continue;
+        int j = j0 - RECV_HALF + 1 + b;
+        float wz = cz[b];
+        if (freeSurf != 0 && j <= sjSurf) {
+            if (j == sjSurf) continue;
+            j = 2 * sjSurf - j;
+            wz = -wz;
+        }
+        if (j <= 1 || j >= H - 1) continue;
+        for (int a = 0; a < NT; a++) {
+            int i = i0 - RECV_HALF + 1 + a;
+            if (cx[a] != 0.0 && i > 1 && i < W - 1) P[j * W + i] += val * 6.21336 * wz * cx[a];   // kSourceGain
+        }
+    }
 }
 void main() {
     StepData s = steps[uStep];

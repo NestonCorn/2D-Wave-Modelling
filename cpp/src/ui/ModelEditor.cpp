@@ -334,9 +334,10 @@ void ModelEditor::tools(Simulation& sim, const std::function<void(const std::str
         ImGui::SetCursorPos(ImVec2(p.x + w - S(110), p.y));
         ImGui::SetNextItemWidth(S(110));
         ImGui::PushFont(fonts.mono);
-        ImGui::InputFloat(id, v, 0, 0, "%.0f");
+        float nv = *v;
+        const bool done = DecimalInput(id, *v, &nv, "%.0f");   // decimals allowed (comma or point)
         ImGui::PopFont();
-        if (ImGui::IsItemDeactivatedAfterEdit()) { *v = std::clamp(std::round(*v), lo, hi); resizeToModel(); }
+        if (done) { *v = std::clamp(nv, lo, hi); resizeToModel(); }
     };
     field("Genişlik (m)", "##mw", &widthM_, 100, 25000);
     field("Derinlik (m)", "##md", &depthM_, 50, 12000);
@@ -352,8 +353,8 @@ void ModelEditor::tools(Simulation& sim, const std::function<void(const std::str
         int j0 = 0, nz = 0;
         const std::vector<float> rows = sim.nodeVelocities(j0, nz);   // the layers, not the solver's cell averages
         const int nx = sim.W_sim;
-        widthM_ = std::round((float)((nx - 1) * sim.SCALE));
-        depthM_ = std::round((float)((nz - 1) * sim.SCALE));
+        widthM_ = (float)((nx - 1) * sim.SCALE);
+        depthM_ = (float)((nz - 1) * sim.SCALE);
         int cw, ch;
         dimsFor(widthM_, depthM_, cw, ch);
         cv_.fromVelocity(rows.data(), nx, nz, cw, ch);

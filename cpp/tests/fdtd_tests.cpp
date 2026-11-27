@@ -64,7 +64,10 @@ static Setup makeSetup(double domW, double domH, double scale, int npml = 40) {
     return s;
 }
 
-// Ricker shot at the domain centre, streamer recording, full-domain box
+// Ricker shot at the domain centre, streamer recording, full-domain box. gSrcBetween: the
+// source between the nodes (0.37 cell right, 5.3 m below the surface: its windowed-sinc
+// spread reaches above the free surface and is mirrored there)
+static bool gSrcBetween = false;
 static std::vector<StepData> makeSteps(const Setup& s, int start, int steps, double T_sismo) {
     std::vector<StepData> v(steps);
     const double dt_phy = s.SCALE / 6000.0 * s.dt, f = 50.0;
@@ -78,8 +81,8 @@ static std::vector<StepData> makeSteps(const Setup& s, int start, int steps, dou
             d.val0 = (float)((1 - 2 * fp) * std::exp(-fp) * 2.0 * s.dt * 0.4);
             d.act0 = d.val0 != 0 ? 1.f : 0.f;
         }
-        d.si0 = (float)(s.W / 2);
-        d.sj0 = (float)std::floor((s.oceanY + 8) / s.SCALE);
+        d.si0 = (float)(s.W / 2) + (gSrcBetween ? 0.37f : 0.0f);
+        d.sj0 = gSrcBetween ? (float)((std::floor(s.oceanY / s.SCALE) * s.SCALE + 5.3) / s.SCALE) : (float)std::floor((s.oceanY + 8) / s.SCALE);
         int gy = (int)std::floor(cyc / T_sismo * 550);
         d.rec_valid = (cyc <= T_sismo && gy < 550) ? 1.f : 0.f;
         d.gy_pix = (float)gy;
@@ -142,11 +145,14 @@ static void testGpuReinit(bool haveGpu) {
 static void testParity(bool haveGpu) {
     std::printf("[parity] CPU vs GPU, 1200x480 m, 500 steps\n");
     if (!haveGpu) { std::printf("  SKIP: no OpenGL 4.3 context\n"); return; }
-    struct Case { int order; bool fs; double scale; };
+    struct Case { int order; bool fs; double scale; bool between = false; };
     const Case cases[] = {{2, true, 4}, {4, true, 4}, {6, true, 4}, {8, true, 4}, {10, true, 4},
-                          {10, false, 4}, {4, false, 4}, {10, false, 1}};   // free surface off: top CPML
+                          {10, false, 4}, {4, false, 4}, {10, false, 1},   // free surface off: top CPML
+                          {10, true, 4, true}, {10, false, 4, true}};      // source between nodes, near the surface
     for (const Case& cs : cases) {
         const int order = cs.order;
+        gSrcBetween = cs.between;
+        if (cs.between) std::printf("  source between nodes (0.37 cell, 5.3 m deep), free surface %s:\n", cs.fs ? "on" : "off");
         Setup s = makeSetup(1200, 480, cs.scale);
         if (!cs.fs) cpmlZ(s.H, 40, s.dt, s.oceanY, s.SCALE, false, s.bz, s.az);
         const size_t sismoSize = (size_t)(s.nRec * 2 + s.nObs) * kSismoStride;
@@ -192,6 +198,62 @@ static void testParity(bool haveGpu) {
         CHECK(rel < 1e-4, "P mismatch O%d fs=%d (%.2e)", order, cs.fs, rel);
         CHECK(srel < 1e-4, "sismo mismatch O%d fs=%d (%.2e)", order, cs.fs, srel);
         gpu.destroy();
+    }
+    gSrcBetween = false;
+}
+
+// A source between the nodes: the whole setup moved by a fraction of a cell (source, streamer
+// and the uniform medium around them) must record the same traces. The source used to be put
+// on the node below / left of it: moved by 1 m on a 4 m grid it stayed on the same node while
+// the receivers moved, and the direct arrival came up to 2.7 ms early or late.
+static void testSourceBetweenNodes() {
+    std::printf("[source position] source between grid nodes: a shift of the whole setup leaves the record unchanged\n");
+    auto run = [](double shift, double dz, bool fs) {
+        Simulation sim;
+        sim.userForceCPU = true;
+        sim.p.dh = 4;
+        sim.p.free_surface = fs;
+        sim.p.ship_speed_knots = 0;
+        sim.p.expanding_box = false;
+        sim.p.freq = 40;
+        sim.p.sismo_ms = 500;
+        sim.p.source_depth = (float)(12 + dz);
+        sim.p.cable_head_depth = sim.p.cable_tail_depth = (float)(20 + dz);
+        sim.p.receiver_spacing = 12.5f;
+        sim.p.cable_len = 400;
+        sim.p.src_rec_dist = 50;
+        sim.init(false);
+        GrayImage g;
+        g.w = 401; g.h = 201;
+        g.gray.assign((size_t)g.w * g.h, 0);
+        std::array<float, 256> vel{};
+        vel[0] = 1500;
+        std::string err;
+        sim.loadModel(modelFromGray(g, vel, 1600, 800, "uniform"), GridModel{}, err);
+        sim.alerts.clear();
+        sim.p.obs_enabled = false;
+        sim.onShipX(1100 + shift);
+        sim.startMode(Mode::Trad);
+        double now = 0;
+        while (sim.cycle_t < sim.sismoSteps()) { now += 1.0 / 60; sim.update(now, 1.0 / 60); sim.cpuSolver().wait(); }
+        for (int i = 0; i < 3; i++) { now += 1.0 / 60; sim.update(now, 1.0 / 60); sim.cpuSolver().wait(); }
+        std::vector<float> g2((size_t)sim.N_REC * sim.sismoSamples());
+        for (int r = 0; r < sim.N_REC; r++)
+            for (int s = 0; s < sim.sismoSamples(); s++) g2[(size_t)r * sim.sismoSamples() + s] = sim.sismo[(size_t)r * kSismoStride + s];
+        return g2;
+    };
+    auto rel = [](const std::vector<float>& a, const std::vector<float>& b) {
+        double d = 0, n = 0;
+        for (size_t i = 0; i < a.size(); i++) { d += (double)(a[i] - b[i]) * (a[i] - b[i]); n += (double)b[i] * b[i]; }
+        return std::sqrt(d / n);
+    };
+    struct C { double dx, dz; bool fs; const char* what; };
+    for (const C c : {C{1.0, 0, false, "1 m along x"}, C{2.0, 0, true, "2 m along x (free surface)"}, C{0, 1.0, false, "1 m deeper"},
+                      C{1.3, 1.7, false, "1.3 m along x, 1.7 m deeper"}}) {
+        const std::vector<float> a = run(0, 0, c.fs), b = run(c.dx, c.dz, c.fs);
+        const double r = rel(b, a);
+        std::printf("  moved %s: record differs by %.2f %% (rms)\n", c.what, 100 * r);
+        CHECK(r < 0.03, "record changed by %.2f %% when the setup moved %s", 100 * r, c.what);
     }
 }
 
@@ -1637,8 +1699,11 @@ static void testColormaps() {
 static void testRegridAfterRun() {
     std::printf("[regrid] grid spacing changed after a CPU run\n");
     for (float dh : {2.0f, 8.0f}) {
+        // a ship at rest: the source fires where it is (not at the node below), so a ship that
+        // moved during the first run would fire from elsewhere
         Simulation a;
         a.userForceCPU = true;
+        a.p.ship_speed_knots = 0;
         a.init(false);
         double now = 0;
         a.startMode(Mode::Trad);
@@ -1654,6 +1719,7 @@ static void testRegridAfterRun() {
 
         Simulation b;   // the same run on a fresh simulation at that spacing
         b.userForceCPU = true;
+        b.p.ship_speed_knots = 0;
         b.p.dh = dh;
         b.init(false);
         double nb = 0;
@@ -2178,6 +2244,7 @@ int main(int argc, char** argv) {
     if (argc > 1 && std::string(argv[1]) == "--colormaps") { testColormaps(); return failures ? 1 : 0; }
     if (argc > 1 && std::string(argv[1]) == "--cellavg") { testCellAverage(); return failures ? 1 : 0; }
     if (argc > 1 && std::string(argv[1]) == "--smoothb") { testSmoothBoundaries(); return failures ? 1 : 0; }
+    if (argc > 1 && std::string(argv[1]) == "--srcpos") { testSourceBetweenNodes(); return failures ? 1 : 0; }
     if (argc > 1 && std::string(argv[1]) == "--imagerun") { imageRun(argc, argv); return 0; }
     if (argc > 1 && std::string(argv[1]) == "--smoothmodel") { smoothModelDump(argc, argv); return 0; }
     if (argc > 2 && std::string(argv[1]) == "--scatter") {
@@ -2240,6 +2307,7 @@ int main(int argc, char** argv) {
     testColormaps();
     testCellAverage();
     testSmoothBoundaries();
+    testSourceBetweenNodes();
     testPulseEnd();
     testSkipGap();
     testMovingSource();

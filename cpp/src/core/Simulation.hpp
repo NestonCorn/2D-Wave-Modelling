@@ -147,7 +147,10 @@ public:
     int sismoSamples() const {
         return std::clamp((int)std::ceil(sismoSteps() / sismoStepsPerSample()), 1, kSismoStride);
     }
-    int sjSurf() const { return (int)std::floor(OCEAN_Y / SCALE); }
+    int sjSurf() const { return (int)std::floor(OCEAN_Y / SCALE + 1e-6); }   // OCEAN_Y is a node (regridNow)
+    // Streamer from its tail to its head receiver: (N_REC - 1) receiver spacings, at most the
+    // cable length (a spacing that does not divide the cable leaves the rest of it unused)
+    double receiverSpan() const { return N_REC > 1 ? (N_REC - 1) * (double)p.receiver_spacing : 0.0; }
     // Solver grid: the model grid (W_sim x H_sim) with the absorbing layers outside it, padX()
     // cells left and right, padTop() above and as many below. Fields, pixels, the wave texture,
     // the eikonal box and CPU / GPU engines live on it; vsq / rho stay on the model grid.

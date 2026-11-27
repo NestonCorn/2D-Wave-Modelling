@@ -679,17 +679,16 @@ void App::sectionGeometry() {
     SimParams& p = sim_.p;
     if (ParamRow("Kablo boyu (m)", "cable", &p.cable_len, 50, 1500, 10, "%.0f")) sim_.onCableLen();
     {
-        static const char* sp[] = {"3.125 m", "6.25 m", "12.5 m", "25 m", "50 m", "100 m"};
-        static const float spv[] = {3.125f, 6.25f, 12.5f, 25.f, 50.f, 100.f};
-        int idx = 1;
-        for (int i = 0; i < 6; i++) if (std::fabs(spv[i] - p.receiver_spacing) < 1e-3f) idx = i;
-        if (ComboRow("Alıcı grup aralığı", "##groupSpace", &idx, sp, 6, S(110))) {
-            p.receiver_spacing = spv[idx];
-            sim_.onReceiverSpacing(true);
-        }
-        char b[16];
-        std::snprintf(b, sizeof(b), "%d", (int)std::floor(p.cable_len / p.receiver_spacing) + 1);
+        if (ParamRow("Alıcı grup aralığı (m)", "groupSpace", &p.receiver_spacing, 1, 100, 0.125f, "%.2f")) sim_.onReceiverSpacing(true);
+        Tip("Alıcılar arasındaki uzaklık; ondalıklı girilebilir (ör. 6,25 ya da 12.5). Alıcılar kablonun başından bu aralıkla dizilir.");
+        char b[64];
+        std::snprintf(b, sizeof(b), "%d", (int)std::floor(p.cable_len / p.receiver_spacing + 1e-6) + 1);
         ReadoutRow("Alıcı sayısı", b);
+        const double span = sim_.receiverSpan();
+        if (std::fabs(span - p.cable_len) > 0.01) {
+            std::snprintf(b, sizeof(b), "Alıcılar kablonun %.2f m'sini kaplıyor.", span);
+            Hint(b);
+        }
     }
     ParamRow("Kablo baş derinliği (m)", "cHead", &p.cable_head_depth, 2, 100, 1, "%.0f");
     ParamRow("Kablo son derinliği (m)", "cTail", &p.cable_tail_depth, 2, 250, 1, "%.0f");
@@ -848,7 +847,7 @@ void App::sectionLine() {
         if (p.ship_speed_knots > 0) Hint(b);
     }
     if (twoShips) {
-        std::snprintf(b, sizeof(b), "%.0f m önde", p.src_offset);
+        std::snprintf(b, sizeof(b), "%g m önde", p.src_offset);
         ReadoutRow("Kaynak gemisi", b);
     }
 
@@ -869,20 +868,20 @@ void App::sectionLine() {
     ReadoutRow("Dalgacık", b);
     std::snprintf(b, sizeof(b), "%.1f", p.amp);
     ReadoutRow("Genlik", b);
-    std::snprintf(b, sizeof(b), "%.0f m", p.source_depth);
+    std::snprintf(b, sizeof(b), "%g m", p.source_depth);
     ReadoutRow("Derinlik", b);
 
     caption("Geometri");
-    std::snprintf(b, sizeof(b), "%.0f m, %g m aralık", p.cable_len, p.receiver_spacing);
+    std::snprintf(b, sizeof(b), "%g m, %g m aralık", p.cable_len, p.receiver_spacing);
     ReadoutRow("Kablo", b);
-    std::snprintf(b, sizeof(b), "%.0f → %.0f m", p.cable_head_depth, p.cable_tail_depth);
+    std::snprintf(b, sizeof(b), "%g → %g m", p.cable_head_depth, p.cable_tail_depth);
     ReadoutRow("Kablo derinliği (baş → son)", b);
-    std::snprintf(b, sizeof(b), "%.0f – %.0f m", p.src_rec_dist, p.src_rec_dist + p.cable_len);
+    std::snprintf(b, sizeof(b), "%g – %g m", p.src_rec_dist, p.src_rec_dist + sim_.receiverSpan());
     ReadoutRow("Ofset (yakın – uzak)", b);
-    std::snprintf(b, sizeof(b), "%.0f m", p.ship_src_dist);
+    std::snprintf(b, sizeof(b), "%g m", p.ship_src_dist);
     ReadoutRow("Gemi – kaynak", b);
     if (p.obs_enabled) {
-        std::snprintf(b, sizeof(b), "%d, %.0f m aralık", sim_.N_OBS, p.obs_spacing);
+        std::snprintf(b, sizeof(b), "%d, %g m aralık", sim_.N_OBS, p.obs_spacing);
         ReadoutRow("OBS", b);
     }
 
@@ -1307,8 +1306,9 @@ void App::modelImportPopup() {
             std::snprintf(b, sizeof(b), "%d", imp_.nz);
             ReadoutRow("Örnek (z)", b);
         }
-        field("Yatay örnek aralığı dx (m)", [&] { ImGui::InputFloat("##impDx", &imp_.dx, 0, 0, "%.3f"); });
-        field("Düşey örnek aralığı dz (m)", [&] { ImGui::InputFloat("##impDz", &imp_.dz, 0, 0, "%.3f"); });
+        // live: the value counts as typed even when "Yükle" is clicked straight from the field
+        field("Yatay örnek aralığı dx (m)", [&] { float t = imp_.dx; if (DecimalInput("##impDx", imp_.dx, &t, "%.3f", true)) imp_.dx = t; });
+        field("Düşey örnek aralığı dz (m)", [&] { float t = imp_.dz; if (DecimalInput("##impDz", imp_.dz, &t, "%.3f", true)) imp_.dz = t; });
         if (imp_.nx > 1 && imp_.nz > 1 && imp_.dx > 0 && imp_.dz > 0) {
             char b[96];
             std::snprintf(b, sizeof(b), "%.0f m × %.0f m", (imp_.nx - 1) * imp_.dx, (imp_.nz - 1) * imp_.dz);

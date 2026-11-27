@@ -86,6 +86,11 @@ void applyTheme(float scale);
 float Animate(ImGuiID id, float target, float ms);
 // Thin track filled to the value, round thumb.
 bool RangeSlider(const char* id, float* v, float vmin, float vmax, float step, float width);
+// Number entry taking a decimal comma or point; true when the field is left after an edit,
+// with *out the typed value (not clamped). FormatDecimal: the value with the format's decimals,
+// more (up to 3) when it has them.
+bool DecimalInput(const char* id, float v, float* out, const char* fmt, bool live = false);   // live: also on every keystroke
+void FormatDecimal(char* buf, size_t n, float v, const char* fmt);
 // Label and editable value on one line, slider below; the number box commits on Enter / focus loss.
 bool ParamRow(const char* label, const char* id, float* v, float vmin, float vmax, float step, const char* fmt);
 bool ParamRowInt(const char* label, const char* id, int* v, int vmin, int vmax, int step);

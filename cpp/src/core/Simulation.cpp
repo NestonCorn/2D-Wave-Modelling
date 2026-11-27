@@ -87,6 +87,14 @@ void Simulation::regridNow() {
     SCALE = p.dh;
     bool coarsened = false;
     for (;;) {
+        // The sea surface on a grid row: the free surface (P = 0) is that row, and the model's
+        // depth 0, the source and the receivers are measured from it (it was up to a cell off
+        // the row the solver used). 16.6 % of the domain above it as before, to the nearest node;
+        // a loaded model keeps its full depth below it.
+        const bool loaded = p.geology == GeologyModel::Imported && hasModel();
+        const double nominal = loaded ? modelVel_.depth() * 0.166 / (1.0 - 0.166) : p.domain_H * 0.166;
+        OCEAN_Y = std::round(nominal / SCALE) * SCALE;
+        if (loaded) p.domain_H = (float)(OCEAN_Y + modelVel_.depth());
         W_sim = (int)std::floor(p.domain_W / SCALE) + 1;
         H_sim = (int)std::floor(p.domain_H / SCALE) + 1;
         // The absorbing layers lie outside the model: npml cells on every side of the solver grid
@@ -104,7 +112,7 @@ void Simulation::regridNow() {
                       "Izgara aralığı otomatik olarak %g m yapıldı (%d x %d hücre).", SCALE, W_sim, H_sim);
         alerts.push_back(msg);
     }
-    N_REC = (int)std::floor(p.cable_len / p.receiver_spacing) + 1;
+    N_REC = (int)std::floor(p.cable_len / p.receiver_spacing + 1e-6) + 1;
     // The HTML only recomputed N_OBS when the OBS spacing changed; keeping it in
     // sync with the domain width avoids OBS stations outside the model.
     N_OBS = std::max(0, (int)std::floor((W_sim * SCALE) / p.obs_spacing));
@@ -613,7 +621,7 @@ void Simulation::onNpml() {
 void Simulation::onCableLen() { onReceiverSpacing(false); }
 
 void Simulation::onReceiverSpacing(bool forceReset) {
-    const int n = (int)std::floor(p.cable_len / p.receiver_spacing) + 1;
+    const int n = (int)std::floor(p.cable_len / p.receiver_spacing + 1e-6) + 1;
     if (n == N_REC && !forceReset) return;
     N_REC = n;
     if (mode != Mode::None) stopMode();
@@ -815,7 +823,10 @@ void Simulation::submitBatch(int steps) {
     double sx = sxShip, sxs = sxSrc;
     const double f = p.freq;
     if (!pulse_.matches(p.wavelet, f)) pulse_.build(p.wavelet, f);
-    const int sj_src = (int)std::floor((OCEAN_Y + p.source_depth) / SCALE) + padT_;
+    // The source between the nodes, where it is (the solvers spread it over the nodes around it);
+    // it was moved down/left to the node below it, up to a cell (4 m on a 4 m grid)
+    const double sj_srcF = (OCEAN_Y + p.source_depth) / SCALE + padT_;
+    const int sj_src = (int)std::lround(sj_srcF);
     const double padXM = padX_ * SCALE, padTM = padT_ * SCALE;
     for (int s = 0; s < steps; s++) {
         StepData& d = stepData_[s];
@@ -825,9 +836,9 @@ void Simulation::submitBatch(int steps) {
         for (const Shot& sh : shots) {
             const double elapsed = (cyc - sh.t0) * dt_phy;
             const double val = pulse_(elapsed) * p.amp * p.dt * 0.4;
-            const float si = (float)(std::floor(sh.x / SCALE) + padX_);   // fixed for the whole shot
-            if (sh.main) { d.si0 = si; d.sj0 = (float)sj_src; d.val0 = (float)val; d.act0 = val != 0 ? 1.f : 0.f; }
-            else         { d.si1 = si; d.sj1 = (float)sj_src; d.val1 = (float)val; d.act1 = val != 0 ? 1.f : 0.f; }
+            const float si = (float)(sh.x / SCALE + padX_);   // fixed for the whole shot
+            if (sh.main) { d.si0 = si; d.sj0 = (float)sj_srcF; d.val0 = (float)val; d.act0 = val != 0 ? 1.f : 0.f; }
+            else         { d.si1 = si; d.sj1 = (float)sj_srcF; d.val1 = (float)val; d.act1 = val != 0 ? 1.f : 0.f; }
         }
         const bool shot2 = (mode == Mode::CLO && cyc >= cur_t_max);
         const double t_local = shot2 ? cyc - cur_t_max : cyc;
@@ -858,7 +869,7 @@ void Simulation::submitBatch(int steps) {
     J.stepData = stepData_.data();
     J.probeRow = std::clamp(sj_src, 0, gH_ - 1);
     J.N_REC = N_REC; J.N_OBS = N_OBS;
-    J.cable_len = p.cable_len;
+    J.cable_len = (float)receiverSpan();   // the receivers exactly receiver_spacing apart, from the head back
     J.SCALE = (float)SCALE;
     J.obsX = obsXg_.data(); J.obsY = obsYg_.data();
     J.renderPixels = !p.sismo_only;
@@ -970,9 +981,9 @@ void Simulation::startEikonal() {
     waitEikonal();
     if (shots.empty()) { eik_.clear(); return; }
     std::vector<std::pair<int, int>> cells;
-    const int sj = (int)std::floor((OCEAN_Y + p.source_depth) / SCALE) + padT_;   // solver grid
+    const int sj = (int)std::lround((OCEAN_Y + p.source_depth) / SCALE) + padT_;   // solver grid, nearest node
     for (const Shot& sh : shots) {
-        cells.push_back({(int)std::floor(sh.x / SCALE) + padX_, sj});
+        cells.push_back({(int)std::lround(sh.x / SCALE) + padX_, sj});
     }
     const double scale = SCALE, dt = p.dt;
     const int W = gW_, H = gH_;
@@ -1088,7 +1099,7 @@ void Simulation::segySnapshotAndSave() {
     base.domainW = p.domain_W; base.domainH = p.domain_H; base.oceanY = OCEAN_Y; base.geology = geoUpper(p.geology);
 
     const double head_x = sxShip - p.ship_src_dist - p.src_rec_dist;
-    const double cable = p.cable_len, tail = p.cable_tail_depth, headD = p.cable_head_depth;
+    const double cable = receiverSpan(), tail = p.cable_tail_depth, headD = p.cable_head_depth;
     const int nrec = N_REC;
     auto streamerRx = [=](int i) {
         double n = nrec > 1 ? (double)i / (nrec - 1) : 0.0;
@@ -1268,7 +1279,7 @@ bool Simulation::appendLineGathers(bool srcVessel, std::string& err) {
 
     {   // streamer, at its position when the shot fired
         const double head_x = line_.shotShipX - p.ship_src_dist - p.src_rec_dist;
-        const double cable = p.cable_len, tail = p.cable_tail_depth, headD = p.cable_head_depth;
+        const double cable = receiverSpan(), tail = p.cable_tail_depth, headD = p.cable_head_depth;
         const int nrec = N_REC;
         SegySpec s = base;
         s.traces = snapS.data(); s.nTraces = N_REC; s.label = srcVessel ? "STREAMER (SOURCE VESSEL SHOT)" : "STREAMER";
@@ -1335,7 +1346,7 @@ bool Simulation::applyConfigJson(const std::string& text, std::string& err) {
     np.dt = std::clamp(np.dt, 0.05f, 1.5f);
     np.npml = std::clamp(np.npml, 5, 60);
     if (np.fd_order != 2 && np.fd_order != 4 && np.fd_order != 6 && np.fd_order != 8) np.fd_order = 10;
-    np.receiver_spacing = std::clamp(np.receiver_spacing, 3.125f, 100.0f);
+    np.receiver_spacing = std::clamp(np.receiver_spacing, 1.0f, 100.0f);
     np.obs_spacing = std::clamp(np.obs_spacing, 50.0f, 500.0f);
     np.freq = std::clamp(np.freq, 0.5f, 250.0f);
     np.amp = std::clamp(np.amp, 0.2f, 20.0f);
@@ -1477,7 +1488,7 @@ void Simulation::writeLineExtras() {
                  {"Hat uzunluğu", fmt("%.1f m", lastX - line_.firstX)},
                  {"Gemi hızı", fmt("%.1f knot (%.2f m/s)", p.ship_speed_knots, mps)},
                  {"Geminin bir kayıtta aldığı yol", fmt("%.1f m", mps * p.sismo_ms / 1000.0 * (line_.mode == Mode::CLO ? 2 : 1))}};
-    if (twoShips) line.rows.push_back({"Kaynak gemisi (ana kaynağın önünde)", fmt("%.0f m", p.src_offset)});
+    if (twoShips) line.rows.push_back({"Kaynak gemisi (ana kaynağın önünde)", fmt("%g m", p.src_offset)});
     report::Section rec{"Kayıt", {}};
     rec.rows = {{"Kayıt uzunluğu", fmt("%d ms", p.sismo_ms)},
                 {"SEG-Y örnek aralığı", "1 ms"},
@@ -1487,16 +1498,16 @@ void Simulation::writeLineExtras() {
     src.rows = {{"Dalgacık", wavNames[std::clamp((int)p.wavelet, 0, 3)]},
                 {"Baskın frekans", fmt("%.1f Hz", p.freq)},
                 {"Kaynak genliği", fmt("%.1f", p.amp)},
-                {"Kaynak derinliği", fmt("%.0f m", p.source_depth)}};
+                {"Kaynak derinliği", fmt("%g m", p.source_depth)}};
     report::Section geo{"Saha geometrisi", {}};
-    geo.rows = {{"Kablo boyu", fmt("%.0f m", p.cable_len)},
+    geo.rows = {{"Kablo boyu", fmt("%g m", p.cable_len)},
                 {"Alıcı grup aralığı", fmt("%g m", p.receiver_spacing)},
-                {"Kablo baş derinliği", fmt("%.0f m", p.cable_head_depth)},
-                {"Kablo son derinliği", fmt("%.0f m", p.cable_tail_depth)},
-                {"Gemi – kaynak uzaklığı", fmt("%.0f m", p.ship_src_dist)},
-                {"Kaynak – ilk alıcı uzaklığı (yakın ofset)", fmt("%.0f m", p.src_rec_dist)},
-                {"Uzak ofset", fmt("%.0f m", p.src_rec_dist + p.cable_len)},
-                {"OBS aralığı", p.obs_enabled ? fmt("%.0f m", p.obs_spacing) : std::string("OBS kapalı")}};
+                {"Kablo baş derinliği", fmt("%g m", p.cable_head_depth)},
+                {"Kablo son derinliği", fmt("%g m", p.cable_tail_depth)},
+                {"Gemi – kaynak uzaklığı", fmt("%g m", p.ship_src_dist)},
+                {"Kaynak – ilk alıcı uzaklığı (yakın ofset)", fmt("%g m", p.src_rec_dist)},
+                {"Uzak ofset", fmt("%g m", p.src_rec_dist + receiverSpan())},
+                {"OBS aralığı", p.obs_enabled ? fmt("%g m", p.obs_spacing) : std::string("OBS kapalı")}};
     report::Section med{"Ortam ve yeraltı modeli", {}};
     med.rows = {{"Hız modeli", modelName},
                 {"Hız aralığı", fmt("%.0f – %.0f m/s", vmin, vmax)},

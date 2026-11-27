@@ -44,12 +44,15 @@ Tek ekranlık bir çalışma istasyonu düzeni:
 **Kaynak dalgacıkları**
 - Ricker (sıfır faz), minimum faz, Gauss, Gauss'un 1. türevi
 - Kaynak, 2B'de yayılan darbenin seçilen dalgacıkla aynı şekilde olacağı biçimde (yarı-integral düzeltmesiyle) enjekte edilir; dalgacık basamaksız biter
+- Kaynak ızgaraya yuvarlanmaz: gerçek konumu (x ve derinlik) düğümler arasındaysa çevresindeki 12 × 12 düğüme, alıcılarla aynı Kaiser pencereli sinc ağırlıklarıyla dağıtılır; tam düğümdeyse yalnız o düğüme yazılır. Deniz yüzeyinin üstüne düşen ağırlıklar, işaret değiştirerek yüzeyin altındaki ayna satırına aktarılır (P = 0 yüzeyinin görüntü kaynağı). Bütün düzen (kaynak, streamer, ortam) ızgara aralığının kesirleri kadar kaydırıldığında kayıt %0,4 içinde aynı kalır; önceden kaynak alttaki/soldaki düğüme kayıyordu (4 m ızgarada 4 m'ye kadar)
+- Deniz yüzeyi bir ızgara satırına oturur: serbest yüzey, model derinliğinin sıfırı, kaynak ve alıcı derinlikleri aynı satırdan ölçülür
 - Hareket eden gemide her atış ateşlendiği hücrede kalır: düşük frekansta saniyeler süren kaynak sinyali hücre değiştirmez, ızgara gürültüsü oluşmaz
 
 **Veri toplama**
 - Geleneksel, SLO ve CLO atış kipleri; hareketli gemi, streamer ve deniz tabanı alıcıları (OBS)
 - Kayıt bitince sonraki atışa geçiş (varsayılan açık): kayıt uzunluğu dolunca gemi kalan yolu kısa bir geçişle kat eder ve yeni atış hemen başlar; atış konumları ve kayıtlar gerçek hızla gitmekle aynıdır
 - Alıcılar ızgaraya yuvarlanmaz: yatayda 12 noktalı Kaiser pencereli sinc, düşeyde doğrusal ara değerlemeyle okunur
+- Mesafeler ondalıklı girilebilir (virgül ya da nokta: 12,5 ya da 12.5); alıcı grup aralığı da 1 – 100 m arasında serbestçe girilir ve alıcılar kablonun başından tam bu aralıkla dizilir
 - Her iz 4096 örneğe kadar saklanır (4000 ms kayıtta 1 ms örnek aralığı)
 - Canlı SEG-Y Rev1 kaydı (her atış ayrı dosya), parametrelerin JSON olarak kaydedilip yüklenmesi
 
@@ -96,7 +99,7 @@ Başsız testler şunları denetler:
 - Kararsızlık algılama, eikonal kutusu, zaman bloklamalı CPU şemasının bariyerli şemayla birebir aynılığı
 - Sınır yansımaları (aynı model kendi alanında ve 1200 m daha büyük bir alanda; deniz yüzeyi açık ve kapalı) ve bir koşudan sonra ızgara aralığı değişince yeni koşunun sıfırdan kurulanla aynı olması
 - Dalgacık şekilleri, yayılan darbe; eikonal kutusu ve serbest yüzey açık/kapalıyken kaynak dalgacığı
-- Alıcı ara değerlemesi (izden ize varış zamanı ve genlik düzgünlüğü)
+- Alıcı ara değerlemesi (izden ize varış zamanı ve genlik düzgünlüğü); düğümler arasındaki kaynak (bütün düzen yatayda ve düşeyde kaydırılınca kaydın değişmemesi, CPU–GPU eşliği, serbest yüzeye bir hücreden yakın kaynak)
 - Yoğunluk: tek yoğunlukta sonucun değişmemesi, yoğunluk sınırında yansıma katsayısının (ρ₂ − ρ₁)/(ρ₂ + ρ₁) çıkması
 - Model dosyaları (SEG-Y IEEE/IBM, ham float32, CSV), modelin simülasyona yüklenmesi ve kaydedilen modelin birebir geri okunması
 - Renk haritaları (uç renkler, parlaklığın hızla artması, seçimin parametre dosyasında saklanması)

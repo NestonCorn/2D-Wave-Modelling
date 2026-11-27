@@ -2,6 +2,8 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include "Ui.hpp"
 #include <imgui_internal.h>   // FindRenderedTextEnd, item flags
 
@@ -54,6 +56,45 @@ bool RangeSlider(const char* id, float* v, float vmin, float vmax, float step, f
     return changed;
 }
 
+// The value as text: the format's decimals, more (up to 3) when the value has them - so 12.5
+// in a "%.0f" field shows as 12.5, not 13
+void FormatDecimal(char* buf, size_t n, float v, const char* fmt) {
+    int prec = 0;
+    if (const char* d = fmt ? std::strchr(fmt, '.') : nullptr) prec = std::atoi(d + 1);
+    int need = 0;
+    while (need < 3 && std::fabs(v * std::pow(10.0, need) - std::round(v * std::pow(10.0, need))) > 1e-3 * std::pow(10.0, need)) need++;
+    std::snprintf(buf, n, "%.*f", std::max(prec, need), v);
+}
+
+static int decimalFilter(ImGuiInputTextCallbackData* d) {
+    if (d->EventChar == ',') d->EventChar = '.';   // the decimal comma of a Turkish keyboard
+    const ImWchar c = d->EventChar;
+    return (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '+' ? 0 : 1;
+}
+
+// Number entry that takes a decimal comma as well as a point. Edits apply when the field is
+// left (Enter, Tab or a click elsewhere): returns true then, with *out the typed value.
+bool DecimalInput(const char* id, float v, float* out, const char* fmt, bool live) {
+    char buf[48];
+    FormatDecimal(buf, sizeof(buf), v, fmt);
+    // the value being typed, kept per field: moving from one field to another, the second can
+    // be activated before the first reports that it was left
+    ImGuiStorage* st = ImGui::GetStateStorage();
+    const ImGuiID key = ImGui::GetID(id) + 0x5eed;
+    if (ImGui::InputText(id, buf, sizeof(buf), ImGuiInputTextFlags_AutoSelectAll | ImGuiInputTextFlags_CallbackCharFilter,
+                         decimalFilter)) {
+        char* end = nullptr;
+        const double x = std::strtod(buf, &end);
+        const float typed = end != buf && std::isfinite(x) ? (float)x : v;
+        st->SetFloat(key, typed);
+        if (live) { *out = typed; return true; }
+    } else if (ImGui::IsItemActivated()) {
+        st->SetFloat(key, v);
+    }
+    if (ImGui::IsItemDeactivatedAfterEdit()) { *out = st->GetFloat(key, v); return true; }
+    return false;
+}
+
 static bool numberBox(const char* id, float* v, float vmin, float vmax, const char* fmt, float w) {
     ImGui::SetNextItemWidth(w);
     ImGui::PushFont(fonts.mono);
@@ -63,8 +104,7 @@ static bool numberBox(const char* id, float* v, float vmin, float vmax, const ch
     ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(S(6), S(3)));
     float tmp = *v;
-    ImGui::InputFloat(id, &tmp, 0, 0, fmt);
-    const bool commit = ImGui::IsItemDeactivatedAfterEdit();
+    const bool commit = DecimalInput(id, *v, &tmp, fmt);
     const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
     if (ImGui::IsItemActive())
         ImGui::GetWindowDrawList()->AddLine(ImVec2(a.x + S(2), b.y - 1), ImVec2(b.x - S(2), b.y - 1), U(col::accent), S(1.5f));

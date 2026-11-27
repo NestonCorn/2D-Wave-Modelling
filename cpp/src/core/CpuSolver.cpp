@@ -498,16 +498,36 @@ void CpuSolver::serialRows(int s, int ra, int rb) {
     float* P = P_.data();
     auto inRows = [&](int sj) { const int r = std::clamp(sj, 0, H - 1); return r >= ra && r < rb; };
 
-    // Source injection (main, then secondary) at a single cell. The HTML spread it over a
-    // 7x7 Gaussian (sigma = 1 cell), which low-passes the radiated wave by exp(-(k sigma)^2/2):
-    // a 50 Hz Ricker left the source at ~43 Hz, more at coarse grids. kSourceGain keeps the
-    // injected total (the sum of the old weights) so amplitudes stay comparable.
-    // Rows at/above the free surface are held at P = 0 and never receive source energy.
-    const int sjMinSrc = J.freeSurface ? J.sj_surf : -1;
+    // Source injection (main, then secondary). The HTML spread it over a 7x7 Gaussian (sigma =
+    // 1 cell), which low-passes the radiated wave by exp(-(k sigma)^2/2): a 50 Hz Ricker left
+    // the source at ~43 Hz, more at coarse grids. kSourceGain keeps the injected total (the sum
+    // of the old weights) so amplitudes stay comparable.
+    // The source sits where it is, between the nodes: spread over the 12 x 12 nodes around it
+    // with the receivers' windowed sinc along both x and z (sourceWeights; the transpose of
+    // reading a receiver). On a node that is the node alone, as before; off a node the radiated
+    // wave is the same as from the true position (it was moved to the node above-left, up to a
+    // cell). Rows at/above the free surface are held at P = 0: a weight that falls above the
+    // surface goes, negated, to its mirror row below it (the image source of a P = 0 surface).
     auto inject = [&](float si_f, float sj_f, float val) {
-        const int si = (int)si_f, sj = (int)sj_f;
-        if (!inRows(sj)) return;
-        if (si > 1 && si < W - 1 && sj > 1 && sj < H - 1 && sj > sjMinSrc) P[(size_t)sj * W + si] += val * kSourceGain;
+        int i0, j0;
+        float cx[2 * kRecvHalf], cz[2 * kRecvHalf];
+        sourceWeights(si_f, sj_f, i0, j0, cx, cz);
+        for (int b = 0; b < 2 * kRecvHalf; b++) {
+            if (cz[b] == 0.0f) continue;
+            int j = j0 - kRecvHalf + 1 + b;
+            float wz = cz[b];
+            if (J.freeSurface && j <= J.sj_surf) {
+                if (j == J.sj_surf) continue;
+                j = 2 * J.sj_surf - j;
+                wz = -wz;
+            }
+            if (j <= 1 || j >= H - 1 || !inRows(j)) continue;
+            float* row = P + (size_t)j * W;
+            for (int a = 0; a < 2 * kRecvHalf; a++) {
+                const int i = i0 - kRecvHalf + 1 + a;
+                if (cx[a] != 0.0f && i > 1 && i < W - 1) row[i] += val * kSourceGain * wz * cx[a];
+            }
+        }
     };
     if (sd.act0 > 0.5f) inject(sd.si0, sd.sj0, sd.val0);
     if (sd.act1 > 0.5f) inject(sd.si1, sd.sj1, sd.val1);

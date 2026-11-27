@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <vector>
@@ -39,8 +40,39 @@ inline const std::vector<float>& recvKernelTable() {
     return tb;
 }
 
+// Weights of the 2 * kRecvHalf nodes along one axis for a point at grid coordinate f: nodes
+// i0 - kRecvHalf + 1 .. i0 + kRecvHalf (i0 = floor(f)), normalised to sum 1. On a node
+// (within 1e-4 cell) exactly that node: the sinc's zeros are not exact in floating point.
+inline void axisWeights(float f, int& i0, float* c) {
+    const float x0 = std::floor(f);
+    i0 = (int)x0;
+    const float t = f - x0;
+    constexpr int NT = 2 * kRecvHalf;
+    if (t < 1e-4f || t > 1.0f - 1e-4f) {
+        for (int k = 0; k < NT; k++) c[k] = 0.0f;
+        if (t > 0.5f) i0++;   // the next node up
+        c[kRecvHalf - 1] = 1.0f;
+        return;
+    }
+    const std::vector<float>& table = recvKernelTable();
+    float sum = 0.0f;
+    for (int k = 0; k < NT; k++) {
+        const float x = (t - (float)(k - kRecvHalf + 1) + kRecvHalf) * kRecvRes;
+        const int q = std::min((int)x, NT * kRecvRes - 1);
+        c[k] = table[q] + (x - q) * (table[q + 1] - table[q]);
+        sum += c[k];
+    }
+    for (int k = 0; k < NT; k++) c[k] /= sum;
+}
+// A point source at (si, sj) (grid coordinates, between nodes) spread over the nodes around
+// it: weight of node (i0 - kRecvHalf + 1 + a, j0 - kRecvHalf + 1 + b) = cx[a] * cz[b]
+inline void sourceWeights(float si, float sj, int& i0, int& j0, float* cx, float* cz) {
+    axisWeights(si, i0, cx);
+    axisWeights(sj, j0, cz);
+}
+
 struct StepData {
-    float si0, sj0, val0, act0;     // main shot cell, wavelet * dt * 0.4, active flag
+    float si0, sj0, val0, act0;     // main shot position (grid coordinates, between nodes), wavelet * dt * 0.4, active flag
     float si1, sj1, val1, act1;     // secondary shot (SLO src / CLO second ship)
     float sxShip;                   // ship x (m) after this step's movement
     float gy_pix;                   // sismogram sample for this step
