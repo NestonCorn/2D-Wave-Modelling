@@ -349,11 +349,9 @@ void ModelEditor::tools(Simulation& sim, const std::function<void(const std::str
     if (ToolButton("Tümünü seçili katmanla doldur", Btn::Ghost, ImVec2(w, 0))) { cv_.snapshot(); cv_.fillAll((uint8_t)sel_); dirty_ = true; }
     if (ToolButton("Mevcut modeli aç", Btn::Ghost, ImVec2(w, 0),
                    "Simülasyonun şu anki hız modelini (deniz yüzeyinden aşağı) çizime aktarır; her farklı hız bir katman olur.")) {
-        const int j0 = std::clamp((int)std::ceil(sim.OCEAN_Y / sim.SCALE - 1e-9), 0, sim.H_sim - 2);
-        const int nx = sim.W_sim, nz = sim.H_sim - j0;
-        std::vector<float> rows((size_t)nx * nz);
-        for (int k = 0; k < nz; k++)
-            for (int i = 0; i < nx; i++) rows[(size_t)k * nx + i] = (float)(std::sqrt((double)sim.vsq[(size_t)(j0 + k) * sim.W_sim + i]) * kVelocityNorm);
+        int j0 = 0, nz = 0;
+        const std::vector<float> rows = sim.nodeVelocities(j0, nz);   // the layers, not the solver's cell averages
+        const int nx = sim.W_sim;
         widthM_ = std::round((float)((nx - 1) * sim.SCALE));
         depthM_ = std::round((float)((nz - 1) * sim.SCALE));
         int cw, ch;

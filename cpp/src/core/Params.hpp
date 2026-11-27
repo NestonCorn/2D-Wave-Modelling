@@ -57,6 +57,8 @@ struct SimParams {
     int model_colormap = 0;          // ModelColormap of the model view (0 Ocean)
     bool show_colorbar = true;       // velocity colour bar on the model view
     bool skip_gap = true;            // live: once the record is complete, glide the ship to the next shot
+    bool cell_average = true;        // each grid cell takes the mean of the model over its area (else the value at the node)
+    bool smooth_boundaries = true;   // piecewise-constant loaded models (images, drawings): boundaries without pixel steps
     bool sismo_only = false;         // "Sadece Sismogram (Turbo)"
 };
 

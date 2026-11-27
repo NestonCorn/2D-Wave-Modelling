@@ -7,7 +7,9 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <sstream>
+#include "Material.hpp"
 #include "Segy.hpp"
 
 namespace fs = std::filesystem;
@@ -258,6 +260,224 @@ bool readAsciiModel(const std::string& path, double dx, double dz, GridModel& ou
     m.source = fileName(path);
     out = std::move(m);
     return true;
+}
+
+namespace {
+
+double bulkOf(double v) { return (double)gardnerDensity(v) * v * v; }
+
+// Velocity whose bulk modulus is (1 - fb) K(a) + fb K(b)
+float mixVelocity(float a, float b, double fb) {
+    if (fb <= 0) return a;
+    if (fb >= 1) return b;
+    const double K = (1 - fb) * bulkOf(a) + fb * bulkOf(b);
+    double lo = std::min(a, b), hi = std::max(a, b);
+    for (int i = 0; i < 40; i++) {
+        const double mid = 0.5 * (lo + hi);
+        (bulkOf(mid) < K ? lo : hi) = mid;
+    }
+    return (float)(0.5 * (lo + hi));
+}
+
+// Gaussian smoothing of a staircase y (constant runs, the steps). The width follows the steps
+// where it is: sigma = half the local step length (the run's own and its neighbours' mean;
+// leaves 0.7 % of the step ripple) - a boundary whose dip changes is smoothed over its own
+// steps everywhere, not over one mean length that is too short on its flat parts and blurs
+// its bends. At least 4 step heights: on steeper boundaries the steps' lengths alternate
+// (20 degrees: 3, 3, 3, 2 pixels, repeating every 11 columns; 4 times that in an image scaled
+// up 4 times), a slow ripple a narrow filter lets through. Beyond the ends the curve is
+// continued by point reflection about the end of a straight line fitted to the first (last)
+// steps, so that a straight boundary stays straight up to its ends.
+std::vector<double> smoothSteps(const std::vector<double>& y) {
+    const int n = (int)y.size();
+    // runs of equal values: start index, length; step heights to the neighbours
+    std::vector<int> rs, rl;
+    for (int k = 0; k < n; k++)
+        if (k == 0 || y[k] != y[k - 1]) { rs.push_back(k); rl.push_back(1); }
+        else rl.back()++;
+    const int nr = (int)rs.size();
+    std::vector<double> sig(n);
+    double periodFirst = rl[0], periodLast = rl[nr - 1];
+    for (int r = 0; r < nr; r++) {
+        double len = 0, hgt = 0;
+        int cl = 0, ch = 0;
+        for (int q = std::max(0, r - 1); q <= std::min(nr - 1, r + 1); q++) {
+            len += rl[q]; cl++;
+            if (q > 0) { hgt += std::fabs(y[rs[q]] - y[rs[q - 1]]); ch++; }
+        }
+        const double period = std::min(400.0, len / cl), height = ch ? hgt / ch : 1.0;
+        if (r == 0) periodFirst = period;
+        if (r == nr - 1) periodLast = period;
+        const double s = std::min(200.0, std::max(0.5 * period, 4.0 * std::max(1.0, height)));
+        for (int k = rs[r]; k < rs[r] + rl[r]; k++) sig[k] = s;
+    }
+    auto endValue = [&](bool first) {
+        const int m = std::min(n, std::max(3, (int)std::ceil(2 * (first ? periodFirst : periodLast))));
+        double sx = 0, sy = 0, sxx = 0, sxy = 0;
+        for (int k = 0; k < m; k++) {
+            const double x = k, v = first ? y[k] : y[n - 1 - k];
+            sx += x; sy += v; sxx += x * x; sxy += x * v;
+        }
+        const double d = m * sxx - sx * sx;
+        return d > 0 ? (sy * sxx - sx * sxy) / d : sy / m;   // the line's value at the end
+    };
+    const double e0 = endValue(true), e1 = endValue(false);
+    auto at = [&](int j) {
+        if (j < 0) return 2 * e0 - y[std::min(-j, n - 1)];
+        if (j > n - 1) return 2 * e1 - y[std::max(2 * (n - 1) - j, 0)];
+        return y[j];
+    };
+    auto gauss = [&](const std::vector<double>& sg) {
+        std::vector<double> out(n);
+        for (int k = 0; k < n; k++) {
+            const double sigma = sg[k];
+            const int h = (int)std::ceil(3 * sigma);
+            double s = 0, ws = 0;
+            for (int j = -h; j <= h; j++) {   // symmetric about k: a straight line stays straight
+                const double wj = std::exp(-0.5 * j * j / (sigma * sigma));
+                s += wj * at(k + j);
+                ws += wj;
+            }
+            out[k] = s / ws;
+        }
+        return out;
+    };
+    // A mean over a bend pulls the curve inwards by about sigma^2 / 2R: where the first pass
+    // shows a bend, sigma is cut so that this stays under 0.1 pixel (at the top of an arc the
+    // steps are long, but there is only one of them to smooth)
+    const std::vector<double> first = gauss(sig);
+    std::vector<double> sig2 = sig;
+    for (int k = 0; k < n; k++) {
+        const int d = std::max(1, (int)std::lround(2 * sig[k]));   // over two widths: the steps' leftover ripple is no bend
+        if (k - d < 0 || k + d > n - 1) continue;
+        const double curv = std::fabs(first[k + d] - 2 * first[k] + first[k - d]) / ((double)d * d);
+        if (curv > 0) sig2[k] = std::max(2.0, std::min(sig[k], std::sqrt(0.2 / curv)));
+    }
+    return gauss(sig2);
+}
+
+// One direction: lines are columns (positions down a column) or rows (positions along a row);
+// idx(line, pos) is the index into the model's values
+template <class Index>
+void smoothPass(const std::vector<float>& orig, std::vector<float>& out, std::vector<float>* rhoOut, std::vector<uint8_t>& touched,
+                int nLines, int nPos, Index idx, BoundaryStats& st) {
+    struct Tr { int pos, chain; float a, b; };
+    struct Chain { int L0; float a, b; std::vector<int> pos; };
+    std::vector<Chain> chains;
+    std::vector<Tr> prev, cur;
+    for (int L = 0; L < nLines; L++) {
+        cur.clear();
+        for (int p = 1; p < nPos; p++) {
+            const float a = orig[idx(L, p - 1)], b = orig[idx(L, p)];
+            if (a != b) cur.push_back({p, -1, a, b});
+        }
+        // Continue a chain of the line before: same two values, the nearest within kJump pixels
+        // (an image scaled up from a smaller drawing has steps several pixels high)
+        constexpr int kJump = 8;
+        size_t j0 = 0;
+        for (Tr& t : cur) {
+            while (j0 < prev.size() && prev[j0].pos < t.pos - kJump) j0++;
+            int best = -1;
+            for (size_t j = j0; j < prev.size() && prev[j].pos <= t.pos + kJump; j++) {
+                const Tr& u = prev[j];
+                if (u.a != t.a || u.b != t.b) continue;
+                const Chain& c = chains[u.chain];
+                if ((int)c.pos.size() != L - c.L0) continue;   // already continued in this line
+                if (best < 0 || std::abs(u.pos - t.pos) < std::abs(prev[best].pos - t.pos)) best = (int)j;
+            }
+            if (best >= 0) {
+                t.chain = prev[best].chain;
+                chains[t.chain].pos.push_back(t.pos);
+            } else {
+                t.chain = (int)chains.size();
+                chains.push_back({L, t.a, t.b, {t.pos}});
+            }
+        }
+        std::swap(prev, cur);
+    }
+    for (const Chain& c : chains) {
+        const int n = (int)c.pos.size();
+        int jumps = 0, maxStep = 1;
+        long travel = 0;
+        for (int k = 1; k < n; k++) {
+            const int d = std::abs(c.pos[k] - c.pos[k - 1]);
+            jumps += d != 0;
+            travel += d;
+            maxStep = std::max(maxStep, d);
+        }
+        if (n < 3 || jumps == 0) continue;
+        if (travel > n - 1) continue;   // steeper than 45 degrees on average: the other direction's pass
+        std::vector<double> z(n);
+        for (int k = 0; k < n; k++) z[k] = c.pos[k] - 0.5;   // between the two pixels
+        const std::vector<double> zs = smoothSteps(z);
+        bool any = false;
+        for (int k = 0; k < n; k++) {
+            // the smoothed boundary stays within the steps' height of the drawn one
+            const double s = std::clamp(zs[k], z[k] - maxStep, z[k] + maxStep);
+            const int L = c.L0 + k;
+            // only the two layers' own pixels next to this boundary: up the a run, down the b run
+            int p0 = c.pos[k] - 1, p1 = c.pos[k];
+            const int lo = std::max(0, (int)std::floor(std::min(z[k], s)) - 1), hi = std::min(nPos - 1, (int)std::ceil(std::max(z[k], s)) + 1);
+            while (p0 - 1 >= lo && orig[idx(L, p0 - 1)] == c.a) p0--;
+            while (p1 + 1 <= hi && orig[idx(L, p1 + 1)] == c.b) p1++;
+            for (int p = p0; p <= p1; p++) {
+                const size_t i = idx(L, p);
+                const float o = orig[i];
+                if (touched[i]) continue;
+                const double fb = std::clamp(p + 0.5 - s, 0.0, 1.0);   // share of the pixel past the boundary
+                if (fb == (o == c.b ? 1.0 : 0.0)) continue;            // wholly on its own side, as before
+                if (rhoOut) {   // both the bulk modulus and the density mixed by area
+                    const double ra = gardnerDensity(c.a), rb = gardnerDensity(c.b);
+                    const double r = (1 - fb) * ra + fb * rb, K = (1 - fb) * ra * c.a * c.a + fb * rb * c.b * c.b;
+                    out[i] = (float)std::sqrt(K / r);
+                    (*rhoOut)[i] = (float)r;
+                } else {
+                    out[i] = mixVelocity(c.a, c.b, fb);
+                }
+                touched[i] = 1;
+                st.pixels++;
+                any = true;
+            }
+        }
+        st.boundaries += any;
+    }
+}
+
+} // namespace
+
+BoundaryStats smoothBoundaries(GridModel& m, GridModel* rho) {
+    BoundaryStats st;
+    if (m.nx < 3 || m.nz < 3) return st;
+    {   // piecewise constant: at most 256 distinct values
+        std::vector<float> seen;
+        float last = 0;
+        bool haveLast = false;   // (no NaN sentinel: comparisons with NaN are not reliable under /fp:fast)
+        for (float x : m.v) {
+            if (haveLast && x == last) continue;   // runs of one value: the common case
+            last = x;
+            haveLast = true;
+            if (std::find(seen.begin(), seen.end(), x) != seen.end()) continue;
+            if (seen.size() == 256) return st;
+            seen.push_back(x);
+        }
+    }
+    st.applicable = true;
+    const std::vector<float> orig = m.v;
+    std::vector<uint8_t> touched(orig.size(), 0);
+    const int nx = m.nx, nz = m.nz;
+    std::vector<float>* rv = nullptr;
+    if (rho) {
+        *rho = GridModel{};
+        rho->nx = m.nx; rho->nz = m.nz; rho->dx = m.dx; rho->dz = m.dz;
+        rho->source = m.source;
+        rho->v.resize(orig.size());
+        for (size_t k = 0; k < orig.size(); k++) rho->v[k] = gardnerDensity(orig[k]);
+        rv = &rho->v;
+    }
+    // Boundaries up to 45 degrees, column by column; then the steeper ones, row by row
+    smoothPass(orig, m.v, rv, touched, nx, nz, [nz](int ix, int iz) { return (size_t)ix * nz + iz; }, st);
+    smoothPass(orig, m.v, rv, touched, nz, nx, [nz](int iz, int ix) { return (size_t)ix * nz + iz; }, st);
+    return st;
 }
 
 bool normalizeModelUnits(GridModel& m, ModelQuantity q, std::string& note, std::string& err) {

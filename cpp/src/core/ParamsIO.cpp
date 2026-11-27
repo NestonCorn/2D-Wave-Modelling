@@ -47,6 +47,8 @@ std::string paramsToJson(const SimParams& p, double shipX) {
                       : p.wavelet == Wavelet::GaussDeriv ? "gaussderiv" : "ricker";   // new in the C++ port
     j["obs_enabled"] = p.obs_enabled;
     j["skip_gap"] = p.skip_gap;
+    j["cell_average"] = p.cell_average;
+    j["smooth_boundaries"] = p.smooth_boundaries;
     j["model_colormap"] = p.model_colormap;
     j["show_colorbar"] = p.show_colorbar;
     return j.dump(2);
@@ -122,6 +124,8 @@ bool paramsFromJson(const std::string& text, SimParams& p, double& shipX, std::s
     }
     if (j.contains("obs_enabled") && j["obs_enabled"].is_boolean()) p.obs_enabled = j["obs_enabled"].get<bool>();
     if (j.contains("skip_gap") && j["skip_gap"].is_boolean()) p.skip_gap = j["skip_gap"].get<bool>();
+    if (j.contains("cell_average") && j["cell_average"].is_boolean()) p.cell_average = j["cell_average"].get<bool>();
+    if (j.contains("smooth_boundaries") && j["smooth_boundaries"].is_boolean()) p.smooth_boundaries = j["smooth_boundaries"].get<bool>();
     if (j.contains("model_colormap") && j["model_colormap"].is_number_integer())
         p.model_colormap = std::clamp(j["model_colormap"].get<int>(), 0, (int)ModelColormap::Count - 1);
     if (j.contains("show_colorbar") && j["show_colorbar"].is_boolean()) p.show_colorbar = j["show_colorbar"].get<bool>();

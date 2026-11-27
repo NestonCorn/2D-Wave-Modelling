@@ -33,6 +33,8 @@ Tek ekranlık bir çalışma istasyonu düzeni:
 - Görselden model: PNG, JPG, BMP, GIF ya da TIFF (boyut sınırı yok; belleğe sığmayan görsel hata mesajıyla reddedilir); her piksel 0–255 gri değerine indirgenir, panelde görseldeki her gri ton listelenir ve her birine hız verilir
 - Model çizimi: katman sınırı (altını boyar), çizgi, fırça ve kova araçlarıyla model elle çizilir; her katmanın adı, rengi ve hızı vardır; geri al / ileri al, mevcut modeli çizime aktarma; çizim katmanları ve boyutuyla .json olarak kaydedilip yeniden açılabilir
 - Derinlik 0 deniz yüzeyidir; alan modelin boyutunu alır, deniz tabanı ve OBS konumları modelden bulunur
+- Hücre ortalaması (varsayılan açık): her ızgara hücresi, içine düşen model parçalarının ortalama bulk modülünü ve yoğunluğunu alır (hazır modellerde sınırlar hücre içinde tam hesaplanır, dosya ve görsel modellerde hücre başına 64'e kadar örnek). Eğimli ve kavisli sınırlar ızgarada basamak gibi saçılma üretmez: 4 m ızgarada 50 Hz'de basamak saçılması yaklaşık yarıya iner, sınır iki düğüm arasında kaldığında kayıt hatası 1 m ızgaraya göre %30'dan %15'e düşer. Kapalıyken her hücre düğüm noktasındaki değeri alır
+- Sınırları basamaksız yap (varsayılan açık): görselden, çizimden ya da az sayıda (en çok 256) farklı hızdan oluşan dosyadan yüklenen modelde her katman sınırı sütun sütun (45°'den dik olanlar satır satır) izlenir; küçük bir çizimden büyütülmüş görsellerdeki birkaç piksel yüksekliğindeki basamaklar da (8 piksele kadar) tanınır. Basamaklar, sınırın o noktadaki basamak boyuna göre yumuşatılır (bükümlerde sınır içe çekilmesin diye daraltılarak) ve sınırın geçtiği pikseller iki tarafın alan ağırlıklı bulk modülünü ve yoğunluğunu alır. Az eğimli bir sınır piksellerde düzenli basamaklara dönüşür ve bunlar kayıtta birbirini kesen yapay eğimli olaylar üretir; 1 m pikselli bir görsel modelde (deniz tabanı altında) bu olaylar bütün gerçek yansımalar kadar güçlüydü. Düz bir sınır yumuşatmadan sonra gerçek doğrudan en çok 0,05 piksel sapar (basamaklı halde 0,5). Kaydedilen model değişmez; yumuşatılmış kopya yalnızca çözücüye gider ([açıklamalı görsel](docs/basamaksiz_sinirlar.png))
 - Yoğunluk verilmezse hızdan hesaplanır: Gardner, ρ = 0.31·V^0.25 (V m/s, ρ g/cm³); su (V ≤ 1600 m/s) için 1.03 g/cm³
 
 **Kaynak dalgacıkları**
@@ -95,11 +97,13 @@ Başsız testler şunları denetler:
 - Model dosyaları (SEG-Y IEEE/IBM, ham float32, CSV), modelin simülasyona yüklenmesi ve kaydedilen modelin birebir geri okunması
 - Renk haritaları (uç renkler, parlaklığın hızla artması, seçimin parametre dosyasında saklanması)
 - Görselden model (gri tonlar, aynı gri tona düşen renkler, simülasyona yükleme) ve model çizimi (sınır dolgusu, çizginin dolguyu durdurması, geri alma, katman silme, mevcut modelden katmanlar, çizim dosyasının kaydedilip açılması), 40 milyon pikselden büyük görsel
+- Hücre ortalaması (sınırdaki hücrenin iki katmanın ortalaması olması, sınırdan uzak hücrelerin değişmemesi, her sütunda bulk modülünün derinlik integralinin korunması, ayarın parametre dosyasında saklanması)
+- Basamaksız sınırlar (2°, 20° ve 70° eğimli düz sınırın gerçek doğruya dönmesi, 4 kat büyütülmüş görseldeki 4 piksellik basamaklar, 800 piksel yarıçaplı yay, gradyanlı modele dokunulmaması, simülasyonun yumuşatılmış kopyayı çözüp asıl modeli koruması)
 - Dalgacığın basamaksız bitmesi, hareketli kaynağın ızgara gürültüsü üretmemesi
 - Sonraki atışa geçişin atış konumlarını ve kayıtları değiştirmemesi (Geleneksel ve CLO)
 - Hat simülasyonu (iz başlıkları, OBS su derinliği, atışların birbirinden bağımsızlığı, SLO ve CLO kayıtları, model görseli, model SEG-Y'sinin geri okunması, PDF raporu), SEG-Y düzeni ve JSON gidiş-dönüşü
 
-`--bench` ile hız ölçümü de çalışır. Ortam değişkenleri: `FDTD_PIPELINE=0` CPU zaman bloklamasını kapatır, `FDTD_TILE=64x4` GPU iş grubu boyutunu değiştirir.
+`--bench` ile hız ölçümü de çalışır. `--scatter KLASÖR` eğimli bir görsel modelini, `--imagerun KLASÖR GÖRSEL GENİŞLİK DERİNLİK X0 X1 ATIŞ_X SÜRE GRİ=HIZ,… [flip,nofs,steps] [KOŞULAR]` kendi görselinizi düğümden okuma, hücre ortalaması (4 m ve 2 m) ve 1 m referans ızgarasıyla çalıştırıp kayıtları ve dalga alanlarını float32 olarak yazar. Ortam değişkenleri: `FDTD_PIPELINE=0` CPU zaman bloklamasını kapatır, `FDTD_TILE=64x4` GPU iş grubu boyutunu değiştirir.
 
 ## Proje yapısı
 

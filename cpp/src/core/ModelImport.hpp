@@ -49,6 +49,23 @@ bool readRawModel(const std::string& path, int nx, int nz, double dx, double dz,
 bool probeAsciiModel(const std::string& path, int& nx, int& nz, std::string& err);
 bool readAsciiModel(const std::string& path, double dx, double dz, GridModel& out, std::string& err);
 
+// Layer boundaries of a piecewise-constant velocity model (an image, a drawing) without the
+// pixel staircase. A gently dipping boundary in pixels is a row of steps one pixel high - on
+// a 2 degree dip one every 29 pixels, several pixels high in an image scaled up from a
+// smaller drawing - and such a regular row of steps radiates coherent dipping events
+// (measured on a 1 m image model: as strong as all the real reflections below the seafloor).
+// Each boundary between two values is traced from column to column (steps up to 8 pixels;
+// slopes up to 45 degrees, steeper ones from row to row), its position smoothed over the
+// length of its steps (a straight boundary stays straight, and within a step's height of the
+// drawn one) and the
+// pixels it crosses take the area-weighted mean bulk modulus and density of the two sides.
+// rho (optional): filled with the matching density model (Gardner from each side's velocity;
+// needed for the exact mix, as the Gardner density jumps at 1600 m/s). Without it the
+// boundary pixels' velocities alone carry the mean bulk modulus, through the Gardner density.
+// Models with more than 256 distinct values (gradients) are left as they are.
+struct BoundaryStats { int boundaries = 0; size_t pixels = 0; bool applicable = false; };
+BoundaryStats smoothBoundaries(GridModel& m, GridModel* rho = nullptr);
+
 // Unit check after reading: velocities given in km/s (max < 20) become m/s, densities in
 // kg/m^3 (max > 100) become g/cm^3. Fails on values no rock or water can have. note says
 // what was converted (empty if nothing).

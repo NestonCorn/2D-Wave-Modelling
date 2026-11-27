@@ -74,6 +74,10 @@ public:
     // model's size. Fails (and changes nothing) on an unusable model.
     bool loadModel(GridModel vel, GridModel rho, std::string& err);
     void clearModel();   // back to the built-in flat-layer model
+    // Velocity (m/s) at each grid node from the first row at or below the sea surface (j0) down,
+    // nz rows of W_sim: the model's own values, not the cell average the solver uses, so that
+    // its layers stay distinct (the drawing window opens the model from these)
+    std::vector<float> nodeVelocities(int& j0, int& nz) const;
     bool hasModel() const { return !modelVel_.empty(); }
     const GridModel& modelVelocity() const { return modelVel_; }
     const GridModel& modelDensity() const { return modelRho_; }
@@ -82,6 +86,9 @@ public:
     // Velocity range (m/s) the model view is coloured over (below the sea surface, model grid)
     std::pair<float, float> viewVelocityRange() const { return viewVelRange_; }
     void onModelColormap();   // p.model_colormap changed: recolour the model view
+    void onSmoothBoundaries();   // p.smooth_boundaries changed: rebuild the solver's copy of the model
+    // What smoothBoundaries did to the loaded model (applicable = false: not piecewise constant)
+    const BoundaryStats& smoothStats() const { return smoothStats_; }
     std::pair<float, float> modelDensityRange() const { return rhoRange_; }
     // Seafloor depth (m from the top of the domain) at x: OBS placement, drawing, SEG-Y
     // Seafloor at x on the canvas (y from the top of the domain, air strip included); what the
@@ -226,6 +233,10 @@ private:
 
     std::vector<float> bx_, ax_, bz_, az_;
     GridModel modelVel_, modelRho_;
+    GridModel modelVelS_;             // modelVel_ with smoothed boundaries (empty: use modelVel_)
+    GridModel modelRhoS_;             // its density, when no density model is loaded (empty: Gardner)
+    BoundaryStats smoothStats_;
+    void rebuildSmoothModel();
     Material mat_;
     double vmaxNorm_ = 0.68, vminMs_ = 1500.0;   // model extremes (CPML damping, CFL / dispersion status)
     std::vector<float> obsX_, obsY_;

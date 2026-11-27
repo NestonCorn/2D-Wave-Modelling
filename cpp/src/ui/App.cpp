@@ -443,6 +443,30 @@ void App::sectionMedium(double now) {
     if (Switch("Deniz yüzeyi yansıması", &fs,
                "Açıkken deniz yüzeyi serbest yüzey (P = 0) olarak yansıtır. Kapalıyken yüzeyin üstünde de soğurucu sınır vardır."))
         sim_.toggleFreeSurface();
+    bool avg = p.cell_average;
+    if (Switch("Hücre ortalaması", &avg,
+               "Her ızgara hücresi, içine düşen model parçalarının ortalamasını alır: eğimli ve kavisli sınırlar ızgarada "
+               "basamak gibi davranıp saçılma üretmez. Kapalıyken her hücre düğüm noktasındaki değeri alır.")) {
+        p.cell_average = avg;
+        sim_.onGeology();
+    }
+    bool sb = p.smooth_boundaries;
+    if (Switch("Sınırları basamaksız yap", &sb,
+               "Görselden, çizimden ya da az sayıda hızdan oluşan dosyadan yüklenen modelde katman sınırları piksel basamakları "
+               "olmadan çözülür. Az eğimli bir sınır piksellerde düzenli basamaklara dönüşür ve bunlar kayıtta birbirini kesen "
+               "yapay eğimli olaylar üretir. Kaydedilen model değişmez.")) {
+        p.smooth_boundaries = sb;
+        sim_.onSmoothBoundaries();
+    }
+    if (p.smooth_boundaries && p.geology == GeologyModel::Imported) {
+        const BoundaryStats& st = sim_.smoothStats();
+        char sbuf[160];
+        if (!st.applicable) Hint("Yüklü modelde çok sayıda farklı hız var (gradyan); sınırlar olduğu gibi kullanılıyor.");
+        else {
+            std::snprintf(sbuf, sizeof(sbuf), "%d sınır basamaksız çizildi (%zu piksel).", st.boundaries, st.pixels);
+            Hint(sbuf);
+        }
+    }
     ImGui::BeginDisabled(p.geology == GeologyModel::Imported);   // a loaded model sets the domain
     if (ParamRow("Alan genişliği (m)", "uiW", &p.domain_W, 800, 25000, 100, "%.0f")) sim_.onDomainWidth(now);
     if (ParamRow("Alan derinliği (m)", "uiH", &p.domain_H, 400, 12000, 40, "%.0f")) sim_.onDomainHeight(now);

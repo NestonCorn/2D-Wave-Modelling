@@ -1067,10 +1067,8 @@ static void testModelCanvas() {
     // Back from a velocity grid (the salt model): one layer per velocity
     Simulation sim;
     sim.init(false);
-    const int j0 = (int)std::ceil(sim.OCEAN_Y / sim.SCALE - 1e-9), nz = sim.H_sim - j0;
-    std::vector<float> rows((size_t)sim.W_sim * nz);
-    for (int k = 0; k < nz; k++)
-        for (int i = 0; i < sim.W_sim; i++) rows[(size_t)k * sim.W_sim + i] = (float)(std::sqrt((double)sim.vsq[(size_t)(j0 + k) * sim.W_sim + i]) * 6000.0);
+    int j0 = 0, nz = 0;
+    const std::vector<float> rows = sim.nodeVelocities(j0, nz);   // what "Mevcut modeli aç" reads
     ModelCanvas c2;
     c2.fromVelocity(rows.data(), sim.W_sim, nz, 300, 100);
     std::printf("  from the salt model: %zu layers:", c2.palette.size());
@@ -1144,6 +1142,446 @@ static double boundaryReflection(float v, bool freeSurface, float freq) {
             d = std::max(d, (double)std::fabs(rec[0][k] - rec[1][k]));
         }
     return mx > 0 ? d / mx : 1;
+}
+
+// Cell average: a cell crossed by a boundary takes the mean bulk modulus and density of its
+// parts; cells away from boundaries keep the layer values; off = the value at the node.
+static void testCellAverage() {
+    std::printf("[cellavg] model averaged over each grid cell\n");
+    {   // built-in flat model: seafloor at 0.52 H = 312 m, on the node of row 78 (cell 310-314 m)
+        const int W = 51, H = 151;
+        std::vector<float> v, r, v0, r0;
+        fillPresetModel(v, r, W, H, 4.0, GeologyModel::Flat, 200, 600, true);
+        fillPresetModel(v0, r0, W, H, 4.0, GeologyModel::Flat, 200, 600, false);
+        const double vw = 0.25, vs = 0.35, rw = gardnerDensity(vw * kVelocityNorm), rs = gardnerDensity(vs * kVelocityNorm);
+        const double want = (0.5 * rw * vw * vw + 0.5 * rs * vs * vs) / (0.5 * rw + 0.5 * rs);
+        const size_t c = (size_t)78 * W + 20;
+        std::printf("  flat model, cell on the seafloor: v^2 %.5f (half water, half sediment %.5f), point value %.5f\n", v[c], want, v0[c]);
+        CHECK(std::fabs(v[c] - want) < 1e-5 && std::fabs(r[c] - 0.5 * (rw + rs)) < 1e-5, "half cell %.5f vs %.5f", v[c], want);
+        CHECK(std::fabs(v0[c] - vs * vs) < 1e-6, "point value at the seafloor node");
+        bool same = true;
+        for (int j : {10, 60, 76, 80, 120})
+            same = same && v[(size_t)j * W + 20] == v0[(size_t)j * W + 20] && r[(size_t)j * W + 20] == r0[(size_t)j * W + 20];
+        CHECK(same, "cells away from the boundaries changed");
+    }
+    {   // image model, 12 degree dipping boundary, 0.5 m pixels, 4 m grid: every column keeps the
+        // depth integral of the bulk modulus; the boundary cells lie between the two layers
+        const double Wm = 400, Dm = 200, pix = 0.5, dip = std::tan(12.0 * 3.14159265358979 / 180.0);
+        GrayImage g;
+        g.w = (int)(Wm / pix) + 1; g.h = (int)(Dm / pix) + 1;
+        g.gray.assign((size_t)g.w * g.h, 0);
+        for (int y = 0; y < g.h; y++)
+            for (int x = 0; x < g.w; x++) g.gray[(size_t)y * g.w + x] = y * pix >= 60 + dip * x * pix ? 255 : 0;
+        std::array<float, 256> vel{};
+        vel[0] = 1500; vel[255] = 2500;
+        Simulation sim;
+        sim.p.dh = 4;
+        sim.init(false);
+        std::string err;
+        const bool ok = sim.loadModel(modelFromGray(g, vel, Wm, Dm, "dip"), GridModel{}, err);
+        CHECK(ok, "load: %s", err.c_str());
+        if (!ok) return;
+        const double Kw = 1.03 * 1500.0 * 1500.0, Ks = gardnerDensity(2500) * 2500.0 * 2500.0;
+        double worst = 0;
+        int mixed = 0, outside = 0;
+        const int j0 = (int)std::ceil(sim.OCEAN_Y / sim.SCALE) + 1, j1 = sim.H_sim - 2;
+        for (int i = 2; i < sim.W_sim - 2; i++) {
+            const double x = i * sim.SCALE, zb = 60 + dip * x;
+            double grid = 0;
+            for (int j = j0; j <= j1; j++) {
+                const size_t k = (size_t)j * sim.W_sim + i;
+                const double v = std::sqrt((double)sim.vsq[k]) * kVelocityNorm, K = sim.rho[k] * v * v;
+                grid += K * sim.SCALE;
+                if (v > 1500.5 && v < 2499.5) mixed++;
+                if (v < 1499.5 || v > 2500.5) outside++;
+            }
+            const double za = (j0 - 0.5) * sim.SCALE - sim.OCEAN_Y, zc = (j1 + 0.5) * sim.SCALE - sim.OCEAN_Y;
+            const double exact = Kw * (std::clamp(zb, za, zc) - za) + Ks * (zc - std::clamp(zb, za, zc));
+            worst = std::max(worst, std::fabs(grid - exact) / exact);
+        }
+        std::printf("  image model, 12 degree boundary: %d boundary cells with mixed values, %d outside the layers, "
+                    "column integral of K within %.3f %%\n", mixed, outside, 100 * worst);
+        CHECK(outside == 0 && mixed > sim.W_sim / 2, "boundary cells (%d mixed, %d outside)", mixed, outside);
+        CHECK(worst < 0.003, "column integral of K off by %.3f %%", 100 * worst);
+    }
+    SimParams p, q;
+    p.cell_average = false;
+    double shipX = 0;
+    std::string err;
+    CHECK(paramsFromJson(paramsToJson(p, 500), q, shipX, err) && !q.cell_average, "cell average setting not kept in the parameter file");
+}
+
+// Boundaries without pixel steps: a straight boundary drawn in pixels comes back straight
+// (its position from the pixel values, column by column or row by row, within a small part
+// of a pixel of the true line instead of up to half a pixel off), a model with gradients is
+// left alone, and the simulation solves the smoothed copy while keeping and saving the original.
+static void testSmoothBoundaries() {
+    std::printf("[smooth boundaries] layer boundaries of image models without the pixel staircase\n");
+    const float va = 1500, vb = 2400;
+    auto K = [](double v) { return (double)gardnerDensity(v) * v * v; };
+    const double Ka = K(va), Kb = K(vb);
+    auto share = [&](double Kp) { return std::clamp((Kb - Kp) / (Kb - Ka), 0.0, 1.0); };   // share of the upper value
+    // up: drawn at 1/up of the resolution and scaled up (steps `up` pixels high), as the
+    // Gokova image (2000 x 640 drawn, 7000 x 2240 given)
+    struct Case { double deg; bool steep; int up; double limit; };
+    for (const Case cs : {Case{2.0, false, 1, 0.08}, Case{20.0, false, 1, 0.08}, Case{70.0, true, 1, 0.08}, Case{2.0, false, 4, 0.25},
+                          Case{20.0, false, 4, 0.25}}) {
+        GridModel m;
+        m.nx = 1200; m.nz = 600; m.dx = m.dz = 1;
+        m.v.resize((size_t)m.nx * m.nz);
+        const double t = std::tan(cs.deg * 3.14159265358979 / 180.0);
+        auto truePos = [&](double line) { return cs.steep ? 300.0 + (line - 100) / t : 100.0 + t * line; };   // z(x), or x(z) when steep
+        const int f = cs.up;
+        auto coarse = [&](int i) { return (i / f) * f + (f - 1) / 2.0; };   // centre of the drawn (coarse) pixel
+        for (int ix = 0; ix < m.nx; ix++)
+            for (int iz = 0; iz < m.nz; iz++)
+                m.v[(size_t)ix * m.nz + iz] = (cs.steep ? coarse(ix) >= truePos(coarse(iz)) : coarse(iz) >= truePos(coarse(ix))) ? vb : va;
+        GridModel s = m, rho;
+        const BoundaryStats st = smoothBoundaries(s, &rho);
+        double before = 0, after = 0;
+        const int nLines = cs.steep ? m.nz : m.nx, nPos = cs.steep ? m.nx : m.nz;
+        for (int L = 60; L < nLines - 60; L++) {   // away from the ends of the boundary
+            const double z = truePos(L);
+            if (z < 20 || z > nPos - 20) continue;
+            double sa = 0, sb = 0;
+            for (int p = 0; p < nPos; p++) {
+                const size_t i = cs.steep ? (size_t)p * m.nz + L : (size_t)L * m.nz + p;
+                sa += share(K(m.v[i]));
+                sb += share((double)rho.v[i] * s.v[i] * s.v[i]);
+            }
+            // boundary position from the pixels: (upper pixels' shares) - 1/2; the staircase is up to 1/2 pixel off
+            before = std::max(before, std::fabs(sa - 0.5 - z));
+            after = std::max(after, std::fabs(sb - 0.5 - z));
+        }
+        std::printf("  %4.0f degrees, steps %d px high: %d boundary, %zu pixels changed; largest offset from the true line %.3f px "
+                    "(pixel steps: %.3f px)\n", cs.deg, f, st.boundaries, st.pixels, after, before);
+        CHECK(st.applicable && st.boundaries >= 1, "%.0f degrees: boundary not smoothed", cs.deg);
+        CHECK(after < cs.limit, "%.0f degrees, %d px steps: smoothed boundary %.3f px off the line", cs.deg, f, after);
+    }
+    {   // a curved boundary (arc of radius 800 px, dips 0 to 39 degrees) is not pulled off its curve
+        GridModel m;
+        m.nx = 1200; m.nz = 600; m.dx = m.dz = 1;
+        m.v.resize((size_t)m.nx * m.nz);
+        auto arc = [](double x) { return -500.0 + std::sqrt(800.0 * 800.0 - (x - 600.0) * (x - 600.0)); };
+        for (int ix = 0; ix < m.nx; ix++)
+            for (int iz = 0; iz < m.nz; iz++) m.v[(size_t)ix * m.nz + iz] = iz >= arc(ix) ? vb : va;
+        GridModel s = m, rho;
+        smoothBoundaries(s, &rho);
+        // rms: where a step is long (the top of the arc) the pixels do not say where in it the
+        // curve lies, for any method
+        double before = 0, after = 0, maxA = 0, maxB = 0;
+        int cnt = 0;
+        for (int ix = 100; ix <= 1100; ix++) {
+            double sa = 0, sb = 0;
+            for (int iz = 0; iz < m.nz; iz++) {
+                const size_t i = (size_t)ix * m.nz + iz;
+                sa += share(K(m.v[i]));
+                sb += share((double)rho.v[i] * s.v[i] * s.v[i]);
+            }
+            const double eb = sa - 0.5 - arc(ix), ea = sb - 0.5 - arc(ix);
+            before += eb * eb; after += ea * ea; cnt++;
+            maxB = std::max(maxB, std::fabs(eb)); maxA = std::max(maxA, std::fabs(ea));
+        }
+        before = std::sqrt(before / cnt); after = std::sqrt(after / cnt);
+        std::printf("  arc of radius 800 px: offset from the curve rms %.3f px, largest %.3f px (pixel steps: rms %.3f, largest %.3f px)\n",
+                    after, maxA, before, maxB);
+        CHECK(after < 0.5 * before && maxA < 0.6, "curved boundary: rms %.3f px (steps %.3f), largest %.3f px", after, before, maxA);
+    }
+    {   // gradient: left as it is
+        GridModel g;
+        g.nx = 50; g.nz = 400; g.dx = g.dz = 1;
+        g.v.resize((size_t)g.nx * g.nz);
+        for (int ix = 0; ix < g.nx; ix++)
+            for (int iz = 0; iz < g.nz; iz++) g.v[(size_t)ix * g.nz + iz] = 1500.0f + 2.0f * iz;
+        const std::vector<float> before = g.v;
+        const BoundaryStats st = smoothBoundaries(g);
+        CHECK(!st.applicable && g.v == before, "gradient model changed (applicable %d, %zu pixels)", (int)st.applicable, st.pixels);
+    }
+    {   // in the simulation: on by default, the original kept, off = the original
+        const double Wm = 600, Dm = 200, dip = std::tan(3.0 * 3.14159265358979 / 180.0);
+        GrayImage img;
+        img.w = 601; img.h = 201;
+        img.gray.assign((size_t)img.w * img.h, 0);
+        for (int y = 0; y < img.h; y++)
+            for (int x = 0; x < img.w; x++) img.gray[(size_t)y * img.w + x] = y >= 80 + dip * x ? 255 : 0;
+        std::array<float, 256> vel{};
+        vel[0] = 1500; vel[255] = 2400;
+        Simulation sim;
+        sim.p.dh = 1;
+        sim.init(false);
+        std::string err;
+        const bool ok = sim.loadModel(modelFromGray(img, vel, Wm, Dm, "dip"), GridModel{}, err);
+        CHECK(ok, "load: %s", err.c_str());
+        if (!ok) return;
+        const std::vector<float> on = sim.vsq;
+        const BoundaryStats stOn = sim.smoothStats();
+        bool origKept = true;
+        for (float v : sim.modelVelocity().v) origKept = origKept && (v == 1500 || v == 2400);
+        sim.p.smooth_boundaries = false;
+        sim.onSmoothBoundaries();
+        const std::vector<float> off = sim.vsq;
+        size_t differ = 0;
+        for (size_t k = 0; k < on.size(); k++) differ += on[k] != off[k];
+        std::printf("  simulation: %d boundary, %zu model pixels smoothed, %zu grid cells differ from the stepped model; saved model unchanged: %s\n",
+                    stOn.boundaries, stOn.pixels, differ, origKept ? "yes" : "NO");
+        CHECK(origKept && stOn.pixels > 100 && differ > 100 && sim.smoothStats().pixels == 0, "smoothing in the simulation");
+    }
+    SimParams p, q;
+    p.smooth_boundaries = false;
+    double shipX = 0;
+    std::string err;
+    CHECK(paramsFromJson(paramsToJson(p, 500), q, shipX, err) && !q.smooth_boundaries, "setting not kept in the parameter file");
+}
+
+// Staircase scattering of a dipping interface: the same sharp image model (0.5 m pixels) at
+// dh 4 with and without the cell average, and at dh 1 as the reference. Writes for each run
+// the streamer gather, a wavefield snapshot and the grid velocity as float32 files plus a
+// text index, for the plotting script.
+// flatAt >= 0: flat layers instead, at 300 + flatAt and 400 + flatAt m (0 = on a 4 m node);
+// -2: the built-in salt dome model (1200 m x 600 m domain) instead of an image.
+static void scatterDemo(const std::string& outDir, double flatAt) {
+    namespace fs = std::filesystem;
+    fs::create_directories(fs::u8path(outDir));
+    const double W = 1200, D = 500, pix = 0.5, tSnap = 0.26;
+    GrayImage g;
+    g.w = (int)(W / pix) + 1; g.h = (int)(D / pix) + 1;
+    g.gray.assign((size_t)g.w * g.h, 0);
+    const double dip = std::tan(12.0 * 3.14159265358979 / 180.0);
+    for (int y = 0; y < g.h; y++)
+        for (int x = 0; x < g.w; x++) {
+            const double xm = x * pix, zm = y * pix;
+            const bool flat = flatAt >= 0;
+            const double top = flat ? 300 + flatAt : 80 + dip * xm;                                             // dipping seafloor (12 degrees)
+            const double dome = flat ? 400 + flatAt : 400 - 100 * std::exp(-std::pow((xm - 600) / 130.0, 2));  // curved deeper layer
+            g.gray[(size_t)y * g.w + x] = zm >= dome ? 255 : zm >= top ? 128 : 0;
+        }
+    std::array<float, 256> vel{};
+    vel[0] = 1500; vel[128] = 2400; vel[255] = 3600;
+    std::ofstream idx(fs::u8path(outDir) / "index.txt");
+    struct Run { const char* name; float dh; bool avg; };
+    for (const Run& r : {Run{"old_dh4", 4, false}, Run{"new_dh4", 4, true}, Run{"old_dh1", 1, false}, Run{"ref_dh1", 1, true}}) {
+        const auto t0 = std::chrono::steady_clock::now();
+        Simulation sim;
+        sim.userForceCPU = true;
+        sim.p.dh = r.dh;
+        sim.p.cell_average = r.avg;
+        sim.p.free_surface = false;
+        sim.p.ship_speed_knots = 0;
+        sim.p.expanding_box = false;
+        sim.p.freq = 50;
+        sim.p.sismo_ms = 600;
+        sim.p.speed_ms = 2;
+        std::string err;
+        if (flatAt == -2.0) {
+            sim.p.geology = GeologyModel::Salt;
+            sim.p.domain_W = 1200;
+            sim.p.domain_H = 600;
+            sim.OCEAN_Y = 100;   // a node of both grids, like the source (0.166 x 600 would be 99.6)
+            sim.init(false);
+        } else {
+            sim.init(false);
+            if (!sim.loadModel(modelFromGray(g, vel, W, D, "dip"), GridModel{}, err)) { std::printf("load failed: %s\n", err.c_str()); return; }
+        }
+        sim.alerts.clear();
+        sim.p.obs_enabled = false;
+        sim.p.source_depth = 8;
+        sim.onShipX(1102);   // source at x = 1052 m, 8 m deep: a node of both grids (the source snaps to a node)
+        sim.startMode(Mode::Trad);
+        double now = 0;
+        std::vector<float> snap;
+        double tGot = 0;
+        while (sim.cycle_t < sim.sismoSteps()) {
+            now += 1.0 / 60;
+            sim.update(now, 1.0 / 60);
+            sim.cpuSolver().wait();
+            if (snap.empty() && sim.cycle_t * sim.dtPhy() >= tSnap) {
+                tGot = sim.cycle_t * sim.dtPhy();
+                const auto& P = sim.cpuSolver().P();
+                snap.resize((size_t)sim.W_sim * sim.H_sim);
+                for (int j = 0; j < sim.H_sim; j++)
+                    for (int i = 0; i < sim.W_sim; i++)
+                        snap[(size_t)j * sim.W_sim + i] = P[(size_t)(j + sim.padTop()) * sim.gridW() + i + sim.padX()];
+            }
+        }
+        for (int i = 0; i < 3; i++) { now += 1.0 / 60; sim.update(now, 1.0 / 60); sim.cpuSolver().wait(); }
+        const int ns = sim.sismoSamples();
+        std::vector<float> gather((size_t)sim.N_REC * ns);
+        for (int k = 0; k < sim.N_REC; k++)
+            for (int s = 0; s < ns; s++) gather[(size_t)k * ns + s] = sim.sismo[(size_t)k * kSismoStride + s];
+        std::vector<float> v(sim.vsq.size());
+        for (size_t k = 0; k < v.size(); k++) v[k] = (float)(std::sqrt((double)sim.vsq[k]) * kVelocityNorm);
+        auto dump = [&](const std::string& f, const std::vector<float>& a) {
+            std::ofstream o(fs::u8path(outDir) / f, std::ios::binary);
+            o.write((const char*)a.data(), (std::streamsize)(a.size() * sizeof(float)));
+        };
+        dump(std::string(r.name) + "_gather.f32", gather);
+        dump(std::string(r.name) + "_snap.f32", snap);
+        dump(std::string(r.name) + "_vel.f32", v);
+        const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        idx << r.name << " " << r.dh << " " << sim.W_sim << " " << sim.H_sim << " " << sim.N_REC << " " << ns << " "
+            << sim.OCEAN_Y << " " << tGot << " " << secs << "\n";
+        std::printf("  %s: grid %dx%d, %d receivers x %d samples, snapshot at %.4f s, %.1f s\n", r.name, sim.W_sim, sim.H_sim,
+                    sim.N_REC, ns, tGot, secs);
+    }
+}
+
+// The same comparison on a user's image model, one shot:
+//   --imagerun OUTDIR IMAGE WIDTH_M DEPTH_M X0 X1 SHOT_X RECORD_S GRAY=VEL,GRAY=VEL,... [OPTIONS] [RUN,RUN,...]
+// The image is cropped to X0..X1 m. OPTIONS, comma separated: "flip" mirrors it, so the
+// streamer that trails the source lies on its right in the image's own coordinates; "nofs"
+// turns the free surface off; "steps" keeps the image's pixel steps (no boundary smoothing;
+// the old_ runs never smooth) ("-" for none). Run names: old_dh4, new_dh4,
+// old_dh2, new_dh2, ref_dh1, all by default); the source (20 m deep, minimum phase, 50 Hz) and the
+// sea surface are put on nodes of every grid so the runs differ only in the grid. Free
+// surface on; streamer 48 x 12.5 m, 20 m deep. Snapshots at 0.5, 0.8 and 1.1 s.
+static void imageRun(int argc, char** argv) {
+    namespace fs = std::filesystem;
+    if (argc < 11) { std::printf("usage: --imagerun OUTDIR IMAGE WIDTH_M DEPTH_M X0 X1 SHOT_X RECORD_S GRAY=VEL,...\n"); return; }
+    const std::string outDir = argv[2];
+    const double Wfull = std::atof(argv[4]), D = std::atof(argv[5]), x0 = std::atof(argv[6]), x1 = std::atof(argv[7]);
+    const double shotX = std::atof(argv[8]), rec = std::atof(argv[9]);
+    std::array<float, 256> vel{};
+    {
+        std::string s = argv[10];
+        size_t pos = 0;
+        while (pos < s.size()) {
+            size_t e = s.find(',', pos);
+            if (e == std::string::npos) e = s.size();
+            const std::string item = s.substr(pos, e - pos);
+            const size_t eq = item.find('=');
+            if (eq != std::string::npos) vel[std::clamp(std::atoi(item.substr(0, eq).c_str()), 0, 255)] = (float)std::atof(item.substr(eq + 1).c_str());
+            pos = e + 1;
+        }
+    }
+    GrayImage full, g;
+    std::string err;
+    if (!loadGrayImage(argv[3], full, err)) { std::printf("image: %s\n", err.c_str()); return; }
+    const double pix = Wfull / (full.w - 1);
+    const int c0 = (int)std::lround(x0 / pix), c1 = std::min(full.w - 1, (int)std::lround(x1 / pix));
+    const std::string opts = argc > 11 ? "," + std::string(argv[11]) + "," : "";
+    const bool flip = opts.find(",flip,") != std::string::npos;
+    const bool freeSurface = opts.find(",nofs,") == std::string::npos;   // "nofs": absorbing top instead
+    const bool smoothB = opts.find(",steps,") == std::string::npos;      // "steps": the image's pixel steps as they are
+    const std::string only = argc > 12 ? argv[12] : "";
+    g.w = c1 - c0 + 1; g.h = full.h;
+    g.gray.resize((size_t)g.w * g.h);
+    for (int y = 0; y < g.h; y++)
+        for (int x = 0; x < g.w; x++) g.gray[(size_t)y * g.w + x] = full.gray[(size_t)y * full.w + c0 + (flip ? g.w - 1 - x : x)];
+    full = GrayImage{};
+    for (int k = 0; k < 256; k++) {   // every gray level present needs a velocity
+        bool used = false;
+        for (uint8_t v : g.gray) if (v == k) { used = true; break; }
+        if (used && vel[k] <= 0) { std::printf("gray level %d has no velocity\n", k); return; }
+    }
+    const double W = (g.w - 1) * pix;
+    std::printf("image %dx%d, %.3f m per pixel; cropped to %.0f..%.0f m (%d columns), %.0f m deep\n", full.w, full.h, pix, x0,
+                x0 + W, g.w, D);
+    fs::create_directories(fs::u8path(outDir));
+    std::ofstream idx(fs::u8path(outDir) / "index.txt");
+    const double snapT[3] = {0.5, 0.8, 1.1};
+    struct Run { const char* name; float dh; bool avg; };
+    for (const Run& r : {Run{"old_dh4", 4, false}, Run{"new_dh4", 4, true}, Run{"old_dh2", 2, false}, Run{"new_dh2", 2, true},
+                         Run{"ref_dh1", 1, true}}) {
+        if (!only.empty() && ("," + only + ",").find("," + std::string(r.name) + ",") == std::string::npos) continue;
+        const auto t0 = std::chrono::steady_clock::now();
+        Simulation sim;
+        sim.userForceCPU = true;
+        sim.p.dh = r.dh;
+        sim.p.cell_average = r.avg;
+        sim.p.smooth_boundaries = smoothB && r.avg;   // the old_ runs: the way it was before both
+        sim.p.free_surface = freeSurface;
+        sim.p.ship_speed_knots = 0;
+        sim.p.expanding_box = true;
+        sim.p.wavelet = Wavelet::MinPhase;
+        sim.p.freq = 50;
+        sim.p.sismo_ms = (int)std::lround(rec * 1000);
+        sim.p.speed_ms = 2;
+        sim.p.receiver_spacing = 12.5f;
+        sim.p.cable_len = 47 * 12.5f;
+        sim.p.cable_head_depth = sim.p.cable_tail_depth = 20;
+        sim.p.source_depth = 20;
+        sim.p.src_rec_dist = 237.5f;
+        sim.init(false);
+        if (!sim.loadModel(modelFromGray(g, vel, W, D, "image"), GridModel{}, err)) { std::printf("load failed: %s\n", err.c_str()); return; }
+        sim.alerts.clear();
+        sim.OCEAN_Y = std::round(sim.OCEAN_Y / 4) * 4;   // the sea surface on a node of all three grids
+        sim.p.obs_enabled = false;
+        sim.onGeology();
+        sim.onShipX((flip ? x0 + W - shotX : shotX - x0) + sim.p.ship_src_dist);   // source at shotX (a node of every grid)
+        std::printf("  %s: boundary smoothing %s: %d boundaries, %zu pixels\n", r.name, sim.p.smooth_boundaries ? "on" : "off",
+                    sim.smoothStats().boundaries, sim.smoothStats().pixels);
+        sim.startMode(Mode::Trad);
+        double now = 0;
+        int nextSnap = 0;
+        double tGot[3] = {0, 0, 0};
+        auto dump = [&](const std::string& f, const std::vector<float>& a) {
+            std::ofstream o(fs::u8path(outDir) / f, std::ios::binary);
+            o.write((const char*)a.data(), (std::streamsize)(a.size() * sizeof(float)));
+        };
+        while (sim.cycle_t < sim.sismoSteps()) {
+            now += 1.0 / 60;
+            sim.update(now, 1.0 / 60);
+            sim.cpuSolver().wait();
+            if (nextSnap < 3 && sim.cycle_t * sim.dtPhy() >= snapT[nextSnap] - 1e-9) {
+                tGot[nextSnap] = sim.cycle_t * sim.dtPhy();
+                const auto& P = sim.cpuSolver().P();
+                std::vector<float> snap((size_t)sim.W_sim * sim.H_sim);
+                for (int j = 0; j < sim.H_sim; j++)
+                    for (int i = 0; i < sim.W_sim; i++)
+                        snap[(size_t)j * sim.W_sim + i] = P[(size_t)(j + sim.padTop()) * sim.gridW() + i + sim.padX()];
+                dump(std::string(r.name) + "_snap" + std::to_string(nextSnap) + ".f32", snap);
+                nextSnap++;
+            }
+        }
+        for (int i = 0; i < 3; i++) { now += 1.0 / 60; sim.update(now, 1.0 / 60); sim.cpuSolver().wait(); }
+        const int ns = sim.sismoSamples();
+        std::vector<float> gather((size_t)sim.N_REC * ns);
+        for (int k = 0; k < sim.N_REC; k++)
+            for (int s = 0; s < ns; s++) gather[(size_t)k * ns + s] = sim.sismo[(size_t)k * kSismoStride + s];
+        std::vector<float> v(sim.vsq.size());
+        for (size_t k = 0; k < v.size(); k++) v[k] = (float)(std::sqrt((double)sim.vsq[k]) * kVelocityNorm);
+        dump(std::string(r.name) + "_gather.f32", gather);
+        dump(std::string(r.name) + "_vel.f32", v);
+        const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        idx << r.name << " " << r.dh << " " << sim.W_sim << " " << sim.H_sim << " " << sim.N_REC << " " << ns << " " << sim.OCEAN_Y
+            << " " << tGot[0] << " " << secs << " " << tGot[1] << " " << tGot[2] << " " << (flip ? x0 + W - shotX : shotX - x0) << "\n";
+        idx.flush();
+        std::printf("  %s: grid %dx%d, %d receivers x %d samples, snapshots %.3f/%.3f/%.3f s, %.1f s\n", r.name, sim.W_sim, sim.H_sim,
+                    sim.N_REC, ns, tGot[0], tGot[1], tGot[2], secs);
+        std::fflush(stdout);
+    }
+}
+
+// --smoothmodel IMAGE OUTDIR GRAY=VEL,...: the image's velocity model before and after
+// smoothBoundaries (and the density that goes with it) as float32, column by column
+// (value(ix, iz) at ix * h + iz), for plotting.
+static void smoothModelDump(int argc, char** argv) {
+    if (argc < 5) { std::printf("usage: --smoothmodel IMAGE OUTDIR GRAY=VEL,...\n"); return; }
+    namespace fs = std::filesystem;
+    std::array<float, 256> vel{};
+    std::string s = argv[4];
+    for (size_t pos = 0; pos < s.size();) {
+        size_t e = s.find(',', pos);
+        if (e == std::string::npos) e = s.size();
+        const std::string item = s.substr(pos, e - pos);
+        const size_t eq = item.find('=');
+        if (eq != std::string::npos) vel[std::clamp(std::atoi(item.substr(0, eq).c_str()), 0, 255)] = (float)std::atof(item.substr(eq + 1).c_str());
+        pos = e + 1;
+    }
+    GrayImage g;
+    std::string err;
+    if (!loadGrayImage(argv[2], g, err)) { std::printf("image: %s\n", err.c_str()); return; }
+    GridModel m = modelFromGray(g, vel, g.w - 1, g.h - 1, "image"), sm = m, rho;
+    const BoundaryStats st = smoothBoundaries(sm, &rho);
+    fs::create_directories(fs::u8path(argv[3]));
+    auto dump = [&](const char* f, const std::vector<float>& a) {
+        std::ofstream o(fs::u8path(argv[3]) / f, std::ios::binary);
+        o.write((const char*)a.data(), (std::streamsize)(a.size() * sizeof(float)));
+    };
+    dump("model_orig.f32", m.v);
+    dump("model_smooth.f32", sm.v);
+    dump("model_rho.f32", rho.v);
+    std::printf("%d x %d, %d boundaries, %zu pixels changed\n", m.nx, m.nz, st.boundaries, st.pixels);
 }
 
 static void testBoundaryReflections() {
@@ -1738,6 +2176,15 @@ int main(int argc, char** argv) {
         }
     }
     if (argc > 1 && std::string(argv[1]) == "--colormaps") { testColormaps(); return failures ? 1 : 0; }
+    if (argc > 1 && std::string(argv[1]) == "--cellavg") { testCellAverage(); return failures ? 1 : 0; }
+    if (argc > 1 && std::string(argv[1]) == "--smoothb") { testSmoothBoundaries(); return failures ? 1 : 0; }
+    if (argc > 1 && std::string(argv[1]) == "--imagerun") { imageRun(argc, argv); return 0; }
+    if (argc > 1 && std::string(argv[1]) == "--smoothmodel") { smoothModelDump(argc, argv); return 0; }
+    if (argc > 2 && std::string(argv[1]) == "--scatter") {
+        const std::string what = argc > 3 ? argv[3] : "";
+        scatterDemo(argv[2], what == "salt" ? -2.0 : what.empty() ? -1.0 : std::atof(what.c_str()));
+        return 0;
+    }
     if (argc > 1 && std::string(argv[1]) == "--boundaries") { testBoundaryReflections(); return failures ? 1 : 0; }
     if (argc > 1 && std::string(argv[1]) == "--regridtest") { testRegridAfterRun(); return failures ? 1 : 0; }
     if (argc > 3 && std::string(argv[1]) == "--gpusnap") {
@@ -1791,6 +2238,8 @@ int main(int argc, char** argv) {
     testRegridAfterRun();
     testBoundaryReflections();
     testColormaps();
+    testCellAverage();
+    testSmoothBoundaries();
     testPulseEnd();
     testSkipGap();
     testMovingSource();

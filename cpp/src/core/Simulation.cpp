@@ -221,18 +221,43 @@ void Simulation::fillModel() {
         // z = 0 of the model is the sea surface; the strip above it takes the top values
         vsq.resize(N);
         rho.resize(N);
-        const bool haveRho = !modelRho_.empty();
-        for (int j = 0; j < H_sim; j++) {
-            const double z = std::max(0.0, j * SCALE - OCEAN_Y);
-            for (int i = 0; i < W_sim; i++) {
-                const double x = i * SCALE;
-                const double v = modelVel_.sample(x, z);
-                const double vn = v / kVelocityNorm;
-                const size_t idx = (size_t)j * W_sim + i;
-                vsq[idx] = (float)(vn * vn);
-                rho[idx] = haveRho ? modelRho_.sample(x, z) : gardnerDensity(v);
-            }
+        const GridModel& mv = modelVelS_.empty() ? modelVel_ : modelVelS_;   // boundaries without the pixel steps
+        const GridModel& mr = modelRho_.empty() ? modelRhoS_ : modelRho_;
+        const bool haveRho = !mr.empty();
+        // Cell average: n x n samples of the (bilinear) model over the cell around each node,
+        // two per model sample at least; the cell takes the mean bulk modulus and the mean
+        // density (see fillPresetModel for why not the harmonic mean). n = 1 is the value at
+        // the node.
+        int n = 1;
+        if (p.cell_average) {
+            const double pix = std::max(1e-6, std::min(modelVel_.dx, modelVel_.dz));
+            n = std::clamp((int)std::ceil(2.0 * SCALE / pix - 1e-9), 1, 8);
+            while (n > 2 && (double)N * n * n > 2.5e8) n--;   // keep the load under a few seconds
         }
+        auto rows = [&](int j0, int j1) {
+            for (int j = j0; j < j1; j++)
+                for (int i = 0; i < W_sim; i++) {
+                    double sr = 0, sK = 0;
+                    for (int a = 0; a < n; a++) {
+                        const double z = std::max(0.0, j * SCALE - OCEAN_Y + (n > 1 ? SCALE * ((a + 0.5) / n - 0.5) : 0.0));
+                        for (int b = 0; b < n; b++) {
+                            const double x = i * SCALE + (n > 1 ? SCALE * ((b + 0.5) / n - 0.5) : 0.0);
+                            const double v = mv.sample(x, z), vn = v / kVelocityNorm;
+                            const double r = haveRho ? mr.sample(x, z) : gardnerDensity(v);
+                            sr += r;
+                            sK += r * vn * vn;
+                        }
+                    }
+                    const size_t idx = (size_t)j * W_sim + i;
+                    vsq[idx] = (float)(sK / sr);   // mean K / mean rho
+                    rho[idx] = (float)(sr / ((double)n * n));
+                }
+        };
+        const int nt = n > 1 ? std::clamp((int)std::thread::hardware_concurrency(), 1, 16) : 1;
+        std::vector<std::thread> pool;
+        for (int t = 1; t < nt; t++) pool.emplace_back(rows, H_sim * t / nt, H_sim * (t + 1) / nt);
+        rows(0, H_sim / nt);
+        for (auto& th : pool) th.join();
         // Seafloor: first depth below the surface where the velocity leaves the water range
         layout = GeoLayout{};
         const int nPts = 400;
@@ -244,8 +269,7 @@ void Simulation::fillModel() {
             layout.seafloor.push_back({(float)x, (float)(OCEAN_Y + z)});
         }
     } else {
-        fillVsq(vsq, W_sim, H_sim, SCALE, p.geology, p.domain_W, p.domain_H);
-        densityFromVsq(vsq, rho);
+        fillPresetModel(vsq, rho, W_sim, H_sim, SCALE, p.geology, p.domain_W, p.domain_H, p.cell_average);
         layout = buildLayout(p.geology, p.domain_W, p.domain_H);
     }
     float mx = 0.0f, mn = 1e30f;
@@ -265,6 +289,44 @@ void Simulation::fillModel() {
     }
     mat_ = makeMaterial(vsqG_, rhoG_, gW_, gH_);
     if (glAvailable_) createModelTexture();
+}
+
+void Simulation::rebuildSmoothModel() {
+    modelVelS_ = GridModel{};
+    modelRhoS_ = GridModel{};
+    smoothStats_ = BoundaryStats{};
+    if (!p.smooth_boundaries || modelVel_.empty()) return;
+    GridModel s = modelVel_, r;
+    // Without a density model of its own, the density goes with the smoothed copy: the boundary
+    // pixels need the mixed density too (the Gardner density jumps at 1600 m/s)
+    smoothStats_ = smoothBoundaries(s, modelRho_.empty() ? &r : nullptr);
+    if (smoothStats_.pixels > 0) {
+        modelVelS_ = std::move(s);
+        modelRhoS_ = std::move(r);
+    }
+}
+
+void Simulation::onSmoothBoundaries() {
+    rebuildSmoothModel();
+    if (p.geology == GeologyModel::Imported) onGeology();
+}
+
+std::vector<float> Simulation::nodeVelocities(int& j0, int& nz) const {
+    j0 = std::clamp((int)std::ceil(OCEAN_Y / SCALE - 1e-9), 0, std::max(0, H_sim - 2));
+    nz = H_sim - j0;
+    std::vector<float> out((size_t)W_sim * nz);
+    if (p.geology == GeologyModel::Imported && hasModel()) {
+        for (int k = 0; k < nz; k++)
+            for (int i = 0; i < W_sim; i++)
+                out[(size_t)k * W_sim + i] = modelVel_.sample(i * SCALE, std::max(0.0, (j0 + k) * SCALE - OCEAN_Y));
+    } else {
+        std::vector<float> v;
+        fillVsq(v, W_sim, H_sim, SCALE, p.geology, p.domain_W, p.domain_H);
+        for (int k = 0; k < nz; k++)
+            for (int i = 0; i < W_sim; i++)
+                out[(size_t)k * W_sim + i] = (float)(std::sqrt((double)v[(size_t)(j0 + k) * W_sim + i]) * kVelocityNorm);
+    }
+    return out;
 }
 
 void Simulation::pushMaterial() {
@@ -351,6 +413,7 @@ bool Simulation::loadModel(GridModel vel, GridModel rhoModel, std::string& err) 
     stopMode();
     modelVel_ = std::move(vel);
     modelRho_ = std::move(rhoModel);
+    rebuildSmoothModel();
     // Ranges once here: the panel shows them every frame, and a scan of a large image model per
     // frame (6 Mpx: ~2 ms) dropped the frame rate, and with it the simulation speed
     velRange_ = {modelVel_.minValue(), modelVel_.maxValue()};
@@ -381,6 +444,9 @@ void Simulation::clearModel() {
     stopMode();
     modelVel_ = GridModel{};
     modelRho_ = GridModel{};
+    modelVelS_ = GridModel{};
+    modelRhoS_ = GridModel{};
+    smoothStats_ = BoundaryStats{};
     velRange_ = rhoRange_ = {0, 0};
     const SimParams def;
     p.geology = GeologyModel::Flat;
@@ -1443,6 +1509,8 @@ void Simulation::writeLineExtras() {
     numSec.rows = {{"Türev derecesi", fmt("%d. derece", p.fd_order)},
                 {"Izgara aralığı", fmt("%g m", SCALE)},
                 {"Izgara", fmt("%d × %d hücre", W_sim, H_sim)},
+                {"Modelin ızgaraya aktarımı", p.cell_average ? "hücre ortalaması" : "düğüm noktasındaki değer"},
+                {"Model sınırları", !modelVelS_.empty() ? fmt("basamaksız (%d sınır)", smoothStats_.boundaries) : std::string("modeldeki gibi")},
                 {"Zaman adımı katsayısı", fmt("%.2f", p.dt)},
                 {"Zaman adımı", fmt("%.4f ms", dtPhy() * 1000.0)},
                 {"Soğurucu sınır", fmt("%d hücre", p.npml)},
